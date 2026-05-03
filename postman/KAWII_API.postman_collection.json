@@ -1,0 +1,442 @@
+{
+  "info": {
+    "name": "KAWII API - Backend",
+    "description": "Coleccion completa para administrar la BD KAWII y sincronizar con BSale.\n\nVariables:\n- base_url: por defecto http://localhost:8000\n\nFlujo tipico:\n1. /health para verificar BD\n2. /taxonomy/tree para ver el arbol\n3. POST /taxonomy/{departments|categories|subcategories} para crear taxonomia local\n4. POST /bsale/product-types para crear una categoria en BSale + mapearla\n5. POST /sync/incremental para reflejar cambios de BSale al instante\n6. PATCH /products/{id}/subcategory para overrides individuales",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" }
+  ],
+  "item": [
+    {
+      "name": "Meta",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/", "host": ["{{base_url}}"], "path": [""] }
+          }
+        },
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Taxonomy (read)",
+      "item": [
+        {
+          "name": "Tree",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/taxonomy/tree", "host": ["{{base_url}}"], "path": ["taxonomy", "tree"] }
+          }
+        },
+        {
+          "name": "List departments",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/taxonomy/departments", "host": ["{{base_url}}"], "path": ["taxonomy", "departments"] }
+          }
+        },
+        {
+          "name": "List categories",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/taxonomy/categories?department_id=1",
+              "host": ["{{base_url}}"],
+              "path": ["taxonomy", "categories"],
+              "query": [{ "key": "department_id", "value": "1" }]
+            }
+          }
+        },
+        {
+          "name": "List subcategories",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/taxonomy/subcategories?category_id=1",
+              "host": ["{{base_url}}"],
+              "path": ["taxonomy", "subcategories"],
+              "query": [{ "key": "category_id", "value": "1" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Taxonomy (admin / CRUD)",
+      "description": "Solo afecta tu BD interna. BSale no tiene departments/categories/subcategories.",
+      "item": [
+        {
+          "name": "Create department",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Nuevo Departamento\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/taxonomy/departments", "host": ["{{base_url}}"], "path": ["taxonomy", "departments"] }
+          }
+        },
+        {
+          "name": "Rename department",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Departamento Renombrado\"\n}" },
+            "url": { "raw": "{{base_url}}/taxonomy/departments/27", "host": ["{{base_url}}"], "path": ["taxonomy", "departments", "27"] }
+          }
+        },
+        {
+          "name": "Delete department (force opcional)",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/taxonomy/departments/27?force=false",
+              "host": ["{{base_url}}"],
+              "path": ["taxonomy", "departments", "27"],
+              "query": [{ "key": "force", "value": "false" }]
+            }
+          }
+        },
+        {
+          "name": "Create category",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"department_id\": 1,\n  \"name\": \"Mi nueva categoria\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/taxonomy/categories", "host": ["{{base_url}}"], "path": ["taxonomy", "categories"] }
+          }
+        },
+        {
+          "name": "Rename category",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Categoria renombrada\"\n}" },
+            "url": { "raw": "{{base_url}}/taxonomy/categories/100", "host": ["{{base_url}}"], "path": ["taxonomy", "categories", "100"] }
+          }
+        },
+        {
+          "name": "Delete category",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/taxonomy/categories/100?force=false",
+              "host": ["{{base_url}}"],
+              "path": ["taxonomy", "categories", "100"],
+              "query": [{ "key": "force", "value": "false" }]
+            }
+          }
+        },
+        {
+          "name": "Create subcategory",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category_id\": 100,\n  \"name\": \"Mi nueva subcategoria\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/taxonomy/subcategories", "host": ["{{base_url}}"], "path": ["taxonomy", "subcategories"] }
+          }
+        },
+        {
+          "name": "Rename subcategory",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Subcategoria renombrada\"\n}" },
+            "url": { "raw": "{{base_url}}/taxonomy/subcategories/2700", "host": ["{{base_url}}"], "path": ["taxonomy", "subcategories", "2700"] }
+          }
+        },
+        {
+          "name": "Delete subcategory",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/taxonomy/subcategories/2700?force=false",
+              "host": ["{{base_url}}"],
+              "path": ["taxonomy", "subcategories", "2700"],
+              "query": [{ "key": "force", "value": "false" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "BSale admin (product_types)",
+      "description": "Estos endpoints SI escriben a BSale via API HTTP.",
+      "item": [
+        {
+          "name": "Create product_type (BSale + BD)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Mi nueva categoria BSale\",\n  \"subcategory_id\": 2638\n}"
+            },
+            "url": { "raw": "{{base_url}}/bsale/product-types", "host": ["{{base_url}}"], "path": ["bsale", "product-types"] }
+          }
+        },
+        {
+          "name": "Rename / re-map product_type",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Nombre nuevo\",\n  \"subcategory_id\": 1157\n}"
+            },
+            "url": { "raw": "{{base_url}}/bsale/product-types/566", "host": ["{{base_url}}"], "path": ["bsale", "product-types", "566"] }
+          }
+        },
+        {
+          "name": "Unmap product_type (no toca BSale)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{base_url}}/bsale/product-types/566?unmap=true",
+              "host": ["{{base_url}}"],
+              "path": ["bsale", "product-types", "566"],
+              "query": [{ "key": "unmap", "value": "true" }]
+            }
+          }
+        },
+        {
+          "name": "Delete product_type",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/bsale/product-types/566?force=false",
+              "host": ["{{base_url}}"],
+              "path": ["bsale", "product-types", "566"],
+              "query": [{ "key": "force", "value": "false" }]
+            }
+          }
+        },
+        {
+          "name": "Resync product_type desde BSale",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/bsale/product-types/566/resync", "host": ["{{base_url}}"], "path": ["bsale", "product-types", "566", "resync"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "List products",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/products?limit=50&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["products"],
+              "query": [
+                { "key": "limit", "value": "50" },
+                { "key": "offset", "value": "0" },
+                { "key": "q", "value": "", "disabled": true },
+                { "key": "department", "value": "", "disabled": true },
+                { "key": "category", "value": "", "disabled": true },
+                { "key": "subcategory", "value": "", "disabled": true },
+                { "key": "mapped_only", "value": "true", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get product",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/products/3355", "host": ["{{base_url}}"], "path": ["products", "3355"] }
+          }
+        },
+        {
+          "name": "PATCH override subcategory",
+          "request": {
+            "method": "PATCH",
+            "url": {
+              "raw": "{{base_url}}/products/3355/subcategory?subcategory_id=2638",
+              "host": ["{{base_url}}"],
+              "path": ["products", "3355", "subcategory"],
+              "query": [{ "key": "subcategory_id", "value": "2638" }]
+            }
+          }
+        },
+        {
+          "name": "PATCH remove override (vuelve a heredar)",
+          "request": {
+            "method": "PATCH",
+            "url": { "raw": "{{base_url}}/products/3355/subcategory", "host": ["{{base_url}}"], "path": ["products", "3355", "subcategory"] }
+          }
+        },
+        {
+          "name": "Stats summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/products/stats/summary", "host": ["{{base_url}}"], "path": ["products", "stats", "summary"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics",
+      "item": [
+        {
+          "name": "KPIs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/kpis?days=30",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "kpis"],
+              "query": [{ "key": "days", "value": "30" }]
+            }
+          }
+        },
+        {
+          "name": "Sales by day",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/sales-by-day?days=30",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "sales-by-day"],
+              "query": [{ "key": "days", "value": "30" }]
+            }
+          }
+        },
+        {
+          "name": "Sales by department",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/sales-by-department?days=30",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "sales-by-department"],
+              "query": [{ "key": "days", "value": "30" }]
+            }
+          }
+        },
+        {
+          "name": "Sales by category",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/sales-by-category?days=30",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "sales-by-category"],
+              "query": [{ "key": "days", "value": "30" }]
+            }
+          }
+        },
+        {
+          "name": "Top products",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/top-products?days=30&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "top-products"],
+              "query": [
+                { "key": "days", "value": "30" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Sales by office",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/sales-by-office?days=30",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "sales-by-office"],
+              "query": [{ "key": "days", "value": "30" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sync",
+      "item": [
+        {
+          "name": "Incremental (rapido, NO docs/stock)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/sync/incremental", "host": ["{{base_url}}"], "path": ["sync", "incremental"] }
+          }
+        },
+        {
+          "name": "Full run (background)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"days\": 7,\n  \"skip_documents\": false,\n  \"skip_stock_snapshot\": false\n}"
+            },
+            "url": { "raw": "{{base_url}}/sync/run", "host": ["{{base_url}}"], "path": ["sync", "run"] }
+          }
+        },
+        {
+          "name": "List tasks",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/sync/tasks", "host": ["{{base_url}}"], "path": ["sync", "tasks"] }
+          }
+        },
+        {
+          "name": "Get task",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/sync/tasks/abc1234567", "host": ["{{base_url}}"], "path": ["sync", "tasks", "abc1234567"] }
+          }
+        },
+        {
+          "name": "Sync log",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sync/log?limit=30",
+              "host": ["{{base_url}}"],
+              "path": ["sync", "log"],
+              "query": [{ "key": "limit", "value": "30" }]
+            }
+          }
+        },
+        {
+          "name": "Data quality issues",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sync/data-quality?limit=100",
+              "host": ["{{base_url}}"],
+              "path": ["sync", "data-quality"],
+              "query": [{ "key": "limit", "value": "100" }]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

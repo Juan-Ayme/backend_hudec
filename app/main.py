@@ -1,0 +1,162 @@
+"""
+KAWII Backend API - entrypoint FastAPI.
+
+Levantar en dev:
+    cd produccion
+    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+Docs interactivas:
+    http://localhost:8000/docs       (Swagger UI)
+    http://localhost:8000/redoc      (ReDoc)
+
+Nota: el frontend/dashboard es un proyecto separado que consume esta API.
+Esta API NO sirve archivos estaticos.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.config import get_settings
+from app.database import close_db_pool, fetch_scalar, init_db_pool
+from app.routers import (
+    analytics,
+    analytics_advanced,
+    audits,
+    bsale_admin,
+    documents,
+    products,
+    stock,
+    sync,
+    taxonomy,
+    taxonomy_admin,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("kawii.api")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: abre pool. Shutdown: cierra."""
+    logger.info("Iniciando KAWII API...")
+    init_db_pool()
+    yield
+    logger.info("Apagando KAWII API...")
+    close_db_pool()
+
+
+settings = get_settings()
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=(
+        "API REST sobre la base de datos KAWII (PostgreSQL + ETL BSale). "
+        "Expone taxonomia, productos, stock, documentos, analytics y "
+        "permite disparar sincronizaciones."
+    ),
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---- Routers ----
+app.include_router(taxonomy.router)
+app.include_router(taxonomy_admin.router)   # CRUD interno (departments/categories/subcategories)
+app.include_router(bsale_admin.router)      # CRUD que escribe a BSale (product_types)
+app.include_router(products.router)
+app.include_router(stock.router)
+app.include_router(documents.router)
+app.include_router(analytics.router)
+app.include_router(analytics_advanced.router)   # ticket + inventario avanzado
+app.include_router(sync.router)
+app.include_router(audits.router)
+
+
+# ---- Root / health ----
+
+@app.get("/", tags=["meta"])
+def root() -> dict:
+    return {
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+@app.get("/health", tags=["meta"])
+def health() -> dict:
+    """Healthcheck con ping a la BD."""
+    try:
+        db_version = fetch_scalar("SELECT version()")
+        db_ok = "ok"
+        productos = fetch_scalar("SELECT COUNT(*) FROM products")
+    except Exception as exc:
+        logger.exception("Health check DB fallo: %s", exc)
+        db_ok = f"error: {exc}"
+        db_version = None
+        productos = None
+
+    return {
+        "status": "ok" if db_ok == "ok" else "degraded",
+        "db": db_ok,
+        "db_version": db_version.split(",")[0] if db_version else None,
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "productos_en_bd": productos,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+# ---- Error handler global ----
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request, exc):
+    """
+    Captura cualquier excepcion no manejada y devuelve 500 JSON.
+
+    Importante: los exception handlers de FastAPI NO pasan por el CORSMiddleware,
+    asi que tenemos que agregar los headers CORS a mano. Sin esto el browser
+    bloquea la respuesta con CORS error y el frontend ve un generico
+    'Failed to fetch' en vez del 500 con detalle.
+    """
+    logger.exception("Error no manejado en %s %s: %s", request.method, request.url, exc)
+
+    # Echo del Origin del request (o '*') en Access-Control-Allow-Origin para
+    # respetar la lista CORS_ORIGINS configurada.
+    origin = request.headers.get("origin", "*")
+    settings = get_settings()
+    allowed = settings.CORS_ORIGINS
+    if "*" in allowed or origin in allowed:
+        allow_origin = origin
+    else:
+        allow_origin = allowed[0] if allowed else "*"
+
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "detail": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        },
+    )
+
+
