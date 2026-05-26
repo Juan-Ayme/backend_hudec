@@ -5,14 +5,16 @@ import subprocess
 import sys
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import Depends, APIRouter, BackgroundTasks, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, text
 from pydantic import BaseModel, Field
 
-from app.database import fetch_all, fetch_one
+from app.database import get_db
 
 
 class SyncRunRequest(BaseModel):
@@ -38,7 +40,7 @@ def _run_update_all(task_id: str, days: int,
 
     json_path = PROJECT_ROOT / f"report_{task_id}.json"
     cmd = [
-        sys.executable, str(PROJECT_ROOT / "scripts" / "update_all.py"),
+        sys.executable, str(PROJECT_ROOT / "tools" / "maintenance" / "update_all.py"),
         "--days", str(days),
         "--json", str(json_path),
     ]
@@ -66,7 +68,7 @@ def _run_update_all(task_id: str, days: int,
 
 
 @router.post("/incremental")
-def trigger_incremental() -> dict:
+async def trigger_incremental(db: AsyncSession = Depends(get_db)) -> dict:
     """
     Sync RAPIDA (en proceso, NO subprocess) que solo refresca catalogo:
         - product_types
@@ -79,8 +81,6 @@ def trigger_incremental() -> dict:
 
     Devuelve un mini-informe JSON con stats por entidad.
     """
-    from datetime import datetime, timezone
-
     started = datetime.now(timezone.utc)
     report: dict[str, Any] = {
         "ok": True,
@@ -119,12 +119,13 @@ def trigger_incremental() -> dict:
     report["duration_s"] = (finished - started).total_seconds()
 
     # Productos huerfanos restantes (sin mapeo via product_type ni override)
-    from app.database import fetch_scalar as _fs
-    huerfanos = _fs("""
+    huerfanos_res = await db.execute(text("""
         SELECT COUNT(*) FROM v_products_full
         WHERE department IS NULL
-    """) or 0
+    """))
+    huerfanos = huerfanos_res.scalar() or 0
     report["productos_huerfanos"] = huerfanos
+    
     if huerfanos > 0:
         report["warnings"].append(
             f"Quedan {huerfanos} productos sin mapear. "
@@ -135,7 +136,7 @@ def trigger_incremental() -> dict:
 
 
 @router.post("/run")
-def trigger_update(payload: SyncRunRequest | None = None) -> dict:
+async def trigger_update(payload: SyncRunRequest | None = None) -> dict:
     """
     Dispara update_all.py en background.
 
@@ -169,13 +170,13 @@ def trigger_update(payload: SyncRunRequest | None = None) -> dict:
 
 
 @router.get("/tasks")
-def list_tasks() -> list[dict]:
+async def list_tasks() -> list[dict]:
     """Tareas disparadas desde la API en esta instancia."""
     return list(_task_state.values())
 
 
 @router.get("/tasks/{task_id}")
-def get_task(task_id: str) -> dict:
+async def get_task(task_id: str) -> dict:
     task = _task_state.get(task_id)
     if not task:
         raise HTTPException(404, f"Task {task_id} no encontrada")
@@ -183,37 +184,30 @@ def get_task(task_id: str) -> dict:
 
 
 @router.get("/log")
-def sync_log(limit: int = Query(30, ge=1, le=500)) -> list[dict]:
+async def sync_log(limit: int = Query(30, ge=1, le=500), db: AsyncSession = Depends(get_db)) -> list[dict]:
     """Historico de syncs persistido en la tabla sync_log."""
-    return fetch_all("""
+    res = await db.execute(text("""
         SELECT id, entity, status, started_at, finished_at,
                records_fetched, records_inserted,
                records_updated, records_skipped, error_message,
                EXTRACT(EPOCH FROM (finished_at - started_at))::int AS duracion_s
         FROM sync_log
         ORDER BY started_at DESC
-        LIMIT %s
-    """, (limit,))
+        LIMIT :limit
+    """), {"limit": limit})
+    return [dict(r) for r in res.mappings().all()]
 
 
-@router.get("/log/{entity}")
-def sync_log_by_entity(entity: str) -> list[dict]:
-    return fetch_all("""
-        SELECT id, entity, status, started_at, finished_at,
-               records_fetched, records_inserted,
-               records_updated, records_skipped, error_message
-        FROM sync_log
-        WHERE entity = %s
-        ORDER BY started_at DESC
-        LIMIT 20
-    """, (entity,))
+# GET /sync/log/{entity} eliminado — no consumido por el frontend
+
 
 
 @router.get("/data-quality")
-def data_quality(limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
-    return fetch_all("""
+async def data_quality(limit: int = Query(100, ge=1, le=1000), db: AsyncSession = Depends(get_db)) -> list[dict]:
+    res = await db.execute(text("""
         SELECT id, entity, bsale_id, field, issue_type, description, created_at
         FROM data_quality_issues
         ORDER BY created_at DESC
-        LIMIT %s
-    """, (limit,))
+        LIMIT :limit
+    """), {"limit": limit})
+    return [dict(r) for r in res.mappings().all()]

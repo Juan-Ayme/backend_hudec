@@ -28,6 +28,7 @@ produccion/
 │   ├── config.py              # Configuraciones de la API
 │   └── routers/               # Controladores de Endpoints
 │       ├── analytics.py       # KPIs comerciales e inventario
+│       ├── analytics_advanced.py # Análisis de ticket detallado
 │       ├── audits.py          # Auditoría de datos, huérfanos, inconsistencias
 │       ├── products.py        # Catálogo, variantes y overrides
 │       ├── stock.py           # Inventario actual
@@ -40,19 +41,22 @@ produccion/
 │   ├── sync_masters.py        # Sync: sucursales, categorías, variantes, stock, costos
 │   └── sync_transactions.py   # Sync: documentos de venta y recepciones (TURBO)
 │
+├── tools/                     # Scripts de mantenimiento y auditoría (uso puntual)
+│   ├── audits/                # Auditorías de datos (final, deep, detail, etc.)
+│   ├── maintenance/           # Limpieza y correcciones (clean, update_all, fix_db)
+│   └── taxonomy/              # Mapeo de categorías (map_orphans)
+│
+├── analytics/                 # Módulo de análisis y reportes
+│   ├── core/                  # Configuración y db_helper
+│   ├── logic/                 # Lógica de cálculo (ticket, inventario)
+│   ├── maintenance/           # Scripts de limpieza analítica
+│   └── reports/               # Generación de informes (PDF, CLI)
+│
 ├── docs/                      # Documentación del Proyecto
 │   ├── ARQUITECTURA.md        # Este archivo
 │   ├── ESTADO_PROYECTO.md     # Estado actual y tareas pendientes
 │   ├── schema.sql             # DDL: Base de datos y Vistas (v_products_full)
 │   └── BSALE_API_AUDIT.md     # Detalles técnicos de la API de BSale
-│
-├── Scripts Principales (CLI)  # Operaciones y Mantenimiento
-│   ├── update_all.py                # Orquestador principal: Sincroniza TODO y actualiza taxonomía
-│   ├── map_orphans.py               # Auto-asigna y mapea productos "huérfanos" a la taxonomía
-│   ├── clean_bsale_categories.py    # NUEVO: Elimina categorías basura/vacías de BSale y BD local
-│   ├── run_daily_sync.py            # Sincronización incremental rápida (diaria)
-│   ├── run_harvest.py               # Sincronización masiva inicial
-│   └── fix_db.py                    # Script de parche para estructura de BD
 │
 ├── .env                       # Variables de entorno y credenciales
 └── requirements.txt           # Dependencias (FastAPI, psycopg2, requests, etc.)
@@ -85,23 +89,23 @@ uvicorn app.main:app --reload
 ### Sincronización Completa del Sistema
 Ejecutar cuando se quiera bajar toda la data reciente de BSale y aplicar reglas de taxonomía.
 ```bash
-python scripts/update_all.py --days 365
+python tools/maintenance/update_all.py --days 365
 ```
 
 ### Limpieza de Categorías Basura (Nuevo)
 Este comando detecta categorías de BSale antiguas, sin productos y sin mapeo. Permite eliminarlas permanentemente de BSale y la BD local para optimizar el sistema.
 ```bash
 # Ver lista de candidatas
-python scripts/clean_bsale_categories.py
+python tools/maintenance/clean_bsale_categories.py
 
 # Ejecutar eliminación permanente
-python scripts/clean_bsale_categories.py --execute
+python tools/maintenance/clean_bsale_categories.py --execute
 ```
 
 ### Mapeo de Huérfanos (Nuevo)
 Asigna automáticamente subcategorías a productos que quedaron fuera del mapeo principal.
 ```bash
-python map_orphans.py
+python tools/taxonomy/map_orphans.py
 ```
 
 ## Base de Datos (PostgreSQL)

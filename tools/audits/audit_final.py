@@ -27,13 +27,13 @@ ESCENARIOS QUE CALCULA:
 
 COMO EJECUTAR:
     cd produccion
-    python scripts/audit_final.py
+    python tools/audits/audit_final.py
 
 NOTA: Requiere que la BD este actualizada (run_daily_sync.py reciente).
 """
 import sys
 from pathlib import Path
-root = Path(__file__).resolve().parent.parent
+root = Path(__file__).resolve().parent.parent.parent
 if str(root) not in sys.path:
     sys.path.append(str(root))
 

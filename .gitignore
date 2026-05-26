@@ -170,3 +170,6 @@ informe_kawii.pdf
 report_*.json
 reports/*.json
 /appDataDir/
+
+/alembic/
+/analytics/

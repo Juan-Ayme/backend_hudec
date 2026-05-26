@@ -42,9 +42,10 @@ Todos los endpoints viven en `app/routers/`. Aquí está el mapa:
 | `stock.py` | `/stock/...` | Stock actual por sucursal y valorización del inventario |
 | `documents.py` | `/documents/...` | Documentos de venta (boletas, facturas) |
 | `analytics.py` | `/analytics/...` | KPIs principales: ventas 30d, ticket promedio, etc. |
-| `analytics_advanced.py` | `/analytics/advanced/...` | Análisis de ticket detallado, rotación de inventario |
+| `analytics_advanced.py` | `/analytics/...` | Análisis de ticket detallado, rotación de inventario |
 | `sync.py` | `/sync/...` | Dispara sincronizaciones manuales desde la API (sin abrir terminal) |
 | `audits.py` | `/audits/...` | Detecta productos huérfanos, inconsistencias de datos |
+
 
 Para ver todos los endpoints con sus parámetros:  
 👉 Ir a `http://localhost:8000/docs` (Swagger UI)
@@ -250,4 +251,6 @@ python-multipart>=0.0.12   # Para uploads de archivos
 | Huérfano | Producto o categoría sin mapeo en la taxonomía Kawii |
 | Override | Asignación manual de categoría a un producto específico (overrride individual) |
 | TURBO | Modo paralelo del sync de documentos (varios hilos simultáneos) |
+| Pool | Conjunto de conexiones reutilizables a Postgres (más eficiente que abrir/cerrar) |
+rios hilos simultáneos) |
 | Pool | Conjunto de conexiones reutilizables a Postgres (más eficiente que abrir/cerrar) |

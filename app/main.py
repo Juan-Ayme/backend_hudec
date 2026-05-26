@@ -22,10 +22,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.database import close_db_pool, fetch_scalar, init_db_pool
+from app.database import engine
+from sqlalchemy import text
 from app.routers import (
     analytics,
-    analytics_advanced,
     audits,
     bsale_admin,
     documents,
@@ -35,6 +35,7 @@ from app.routers import (
     taxonomy,
     taxonomy_admin,
 )
+from app.kawii_matrix.router import router as matrix_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,12 +47,11 @@ logger = logging.getLogger("kawii.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: abre pool. Shutdown: cierra."""
+    """Startup: logging. Shutdown: cierra."""
     logger.info("Iniciando KAWII API...")
-    init_db_pool()
     yield
     logger.info("Apagando KAWII API...")
-    close_db_pool()
+    await engine.dispose()
 
 
 settings = get_settings()
@@ -84,9 +84,9 @@ app.include_router(products.router)
 app.include_router(stock.router)
 app.include_router(documents.router)
 app.include_router(analytics.router)
-app.include_router(analytics_advanced.router)   # ticket + inventario avanzado
 app.include_router(sync.router)
 app.include_router(audits.router)
+app.include_router(matrix_router)  # /matrix/* — matrices de clasificación inteligente
 
 
 # ---- Root / health ----
@@ -101,13 +101,17 @@ def root() -> dict:
     }
 
 
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database import get_db
+
 @app.get("/health", tags=["meta"])
-def health() -> dict:
+async def health(db: AsyncSession = Depends(get_db)) -> dict:
     """Healthcheck con ping a la BD."""
     try:
-        db_version = fetch_scalar("SELECT version()")
+        db_version = await db.scalar(text("SELECT version()"))
         db_ok = "ok"
-        productos = fetch_scalar("SELECT COUNT(*) FROM products")
+        productos = await db.scalar(text("SELECT COUNT(*) FROM products"))
     except Exception as exc:
         logger.exception("Health check DB fallo: %s", exc)
         db_ok = f"error: {exc}"

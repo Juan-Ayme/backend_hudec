@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 # Resolver ruta raiz del proyecto para importaciones
-root_path = Path(__file__).resolve().parent.parent
+root_path = Path(__file__).resolve().parent.parent.parent
 if str(root_path) not in sys.path:
     sys.path.append(str(root_path))
 
@@ -40,6 +40,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from harvester import db
 from harvester.sync_masters import (
@@ -54,7 +55,7 @@ from harvester.sync_masters import (
     sync_product_type_attributes,
     sync_variant_attribute_values,
 )
-from harvester.sync_transactions import sync_documents, sync_receptions
+from harvester.sync_transactions import sync_documents, sync_receptions, sync_consumptions
 
 
 LOG_FMT = "%(asctime)s [%(levelname)-7s] %(name)s: %(message)s"
@@ -165,9 +166,9 @@ def build_report(phase_results: dict, elapsed_sec: float) -> dict:
     ]
 
     # --- Ventas ultimos 30 dias (top departamentos, usa v_products_full) ---
-    # Solo sucursales activas (alineado con analytics_scripts/config.py).
+    # Solo sucursales activas (alineado con analytics/core/config.py).
     try:
-        from analytics_scripts.config import OFFICE_IDS as _OIDS
+        from analytics.core.config import OFFICE_IDS as _OIDS
         _office_ids_sql = ", ".join(str(i) for i in _OIDS)
         top_ventas = _q(f"""
             SELECT vpf.department,
@@ -177,7 +178,7 @@ def build_report(phase_results: dict, elapsed_sec: float) -> dict:
             JOIN documents doc       ON doc.bsale_document_id  = dd.bsale_document_id
             JOIN variants v          ON v.bsale_variant_id     = dd.bsale_variant_id
             JOIN v_products_full vpf ON vpf.bsale_product_id   = v.bsale_product_id
-            WHERE doc.emission_date >= NOW() - INTERVAL '30 days'
+            WHERE (doc.emission_date AT TIME ZONE 'America/Lima')::date >= CURRENT_DATE - 30
               AND COALESCE(doc.is_credit_note, FALSE) = FALSE
               AND doc.bsale_office_id IN ({_office_ids_sql})
               AND vpf.department IS NOT NULL
@@ -334,9 +335,16 @@ def main() -> int:
     setup_logging(verbose=args.verbose)
     logger = logging.getLogger("update_all")
 
-    since_dt = (datetime.now(timezone.utc) - timedelta(days=args.days)) \
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-    since_unix = int(since_dt.timestamp())
+    # FIX TIMEZONE: calcular "medianoche Lima" hace N dias, no medianoche UTC.
+    # Antes: medianoche UTC = 19:00 Lima del dia anterior -> perdiamos 5h de ventas.
+    # Ahora: medianoche Lima hace N dias -> rango correcto que coincide con BSale.
+    _lima_tz = ZoneInfo("America/Lima")
+    _now_lima = datetime.now(_lima_tz)
+    since_dt_lima = (_now_lima - timedelta(days=args.days)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    since_unix = int(since_dt_lima.timestamp())
+    since_dt = since_dt_lima  # para el logger
 
     logger.info("=" * 72)
     logger.info("  KAWII UPDATE ALL - %d dias atras", args.days)
@@ -408,6 +416,19 @@ def main() -> int:
         except Exception as exc:
             phase_results["11.Recepciones"] = {"ERROR": str(exc)}
             logger.exception("  Recepciones FALLO: %s", exc)
+
+        # --- 3.5 Consumos ---
+        logger.info(">>> FASE 3.5: Consumos")
+        t0 = time.time()
+        try:
+            r = sync_consumptions()
+            phase_results["11.5.Consumos"] = {
+                "resultado": str(r), "duracion_s": round(time.time() - t0, 1),
+            }
+            logger.info("  Consumos: %.1fs | %s", time.time() - t0, r)
+        except Exception as exc:
+            phase_results["11.5.Consumos"] = {"ERROR": str(exc)}
+            logger.exception("  Consumos FALLO: %s", exc)
 
         # --- 4. Documentos ---
         if not args.skip_documents:

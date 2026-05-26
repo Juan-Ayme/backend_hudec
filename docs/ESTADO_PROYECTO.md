@@ -1,4 +1,4 @@
-# KAWII - Estado del Proyecto (Actualizado Abril 2026)
+         # KAWII - Estado del Proyecto (Actualizado Abril 2026)
 
 > Última actualización: **2026-04-26**
 > BD: `database_kawii_pluss` en `localhost:5432` (postgres/postgres)
@@ -42,17 +42,17 @@ Las diferencias o "huérfanos" (categorías BSale con productos que el cliente n
 
 ## 4. Comandos Incorporados Recientemente
 
-### `python clean_bsale_categories.py`
+### `python tools/maintenance/clean_bsale_categories.py`
 Examina la base de datos local y BSale en busca de `product_types` que no estén mapeados y no tengan productos. 
 - `--execute`: Los elimina vía API de BSale y hace un DELETE en PostgreSQL. Ya se usó exitosamente para limpiar 260 registros.
 
-### `python map_orphans.py`
+### `python tools/taxonomy/map_orphans.py`
 Mapeo rápido de productos que perdieron su jerarquía. Útil para mantener la salud de los reportes.
 
-### `python update_all.py`
+### `python tools/maintenance/update_all.py`
 El macro-script. Se recomienda correrlo a diario (puede reemplazar o acompañar a `run_daily_sync.py`). Sincroniza desde cero y asegura que las vistas estén compiladas.
 
-### `python fix_db.py`
+### `python tools/maintenance/fix_db.py`
 Script de emergencia (ya ejecutado y plasmado en `schema.sql`) para forzar la creación de `v_products_full` y agregar las columnas de override.
 
 ---

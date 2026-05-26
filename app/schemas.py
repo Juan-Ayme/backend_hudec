@@ -3,18 +3,20 @@
 from datetime import datetime, date
 from typing import Optional, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---- Taxonomia ----
 
 class Department(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     name: str
     slug: Optional[str] = None
 
 
 class Category(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     department_id: int
     name: str
@@ -22,6 +24,7 @@ class Category(BaseModel):
 
 
 class Subcategory(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     category_id: int
     name: str
@@ -29,12 +32,14 @@ class Subcategory(BaseModel):
 
 
 class TaxonomyTree(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     departments: list[dict]
 
 
 # ---- Productos ----
 
 class Product(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     bsale_product_id: int
     name: str
     bsale_product_type_id: Optional[int] = None
@@ -46,6 +51,7 @@ class Product(BaseModel):
 
 
 class Variant(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     bsale_variant_id: int
     bsale_product_id: int
     code: Optional[str] = None
@@ -57,6 +63,7 @@ class Variant(BaseModel):
 # ---- Stock ----
 
 class StockLevel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     bsale_variant_id: int
     bsale_office_id: int
     office_name: Optional[str] = None
@@ -66,6 +73,7 @@ class StockLevel(BaseModel):
 
 
 class StockValuation(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     sucursal: str
     valor_soles: float
     unidades: float
@@ -74,6 +82,7 @@ class StockValuation(BaseModel):
 # ---- Documentos / Ventas ----
 
 class Document(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     bsale_document_id: int
     document_type_name: Optional[str] = None
     number: Optional[str] = None
@@ -84,12 +93,14 @@ class Document(BaseModel):
 
 
 class SalesByDepartment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     departamento: str
     ventas: float
     tickets: int
 
 
 class SalesByDay(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     dia: date
     ventas: float
     tickets: int
@@ -98,6 +109,7 @@ class SalesByDay(BaseModel):
 # ---- Analytics ----
 
 class DashboardKPIs(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     ventas_30d: float
     tickets_30d: int
     ticket_promedio_30d: float
@@ -111,6 +123,7 @@ class DashboardKPIs(BaseModel):
 # ---- Sync ----
 
 class SyncLogEntry(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     entity: str
     status: str
@@ -124,12 +137,14 @@ class SyncLogEntry(BaseModel):
 
 
 class SyncTriggerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     ok: bool
     message: str
     task_id: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     status: str
     db: str
     version: str

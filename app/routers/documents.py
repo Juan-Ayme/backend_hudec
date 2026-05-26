@@ -1,55 +1,71 @@
 """Endpoints de documentos (ventas / boletas / facturas / notas).
 
 Por defecto solo lista documentos de las sucursales activas
-(OFFICE_IDS en analytics_scripts/config.py). Si el frontend pasa
+(OFFICE_IDS en analytics.core.config). Si el frontend pasa
 un office_id explicito (ej. para una vista de auditoria),
 se respeta ese filtro especifico.
+
+FIX (2026-05-06): Los filtros date_from / date_to ahora comparan contra
+  (emission_date AT TIME ZONE 'America/Lima')::date para evitar que ventas
+  nocturnas (> 19:00 Lima) queden asignadas al dia siguiente en UTC.
 """
 
 from datetime import date, datetime
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import Depends, APIRouter, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
-from analytics_scripts.config import OFFICE_IDS
-from app.database import fetch_all, fetch_one, fetch_scalar
+from analytics.core.config import OFFICE_IDS
+from app.database import get_db
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _OFFICE_IDS_SQL = ", ".join(str(i) for i in OFFICE_IDS)
 
+# Zona horaria del negocio (Peru / Lima = UTC-5)
+_TZ = "America/Lima"
+
 
 @router.get("")
-def list_documents(
+async def list_documents(
     date_from: date | None = None,
     date_to: date | None = None,
     document_type_id: int | None = None,
     office_id: int | None = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db)
 ) -> dict:
     where = []
-    params: list = []
+    params = {}
+    
     if date_from:
-        where.append("doc.emission_date >= %s")
-        params.append(date_from)
+        where.append(f"(doc.emission_date AT TIME ZONE '{_TZ}')::date >= :date_from")
+        params["date_from"] = date_from
     if date_to:
-        where.append("doc.emission_date < %s")
-        params.append(date_to)
+        where.append(f"(doc.emission_date AT TIME ZONE '{_TZ}')::date < :date_to")
+        params["date_to"] = date_to
     if document_type_id:
-        where.append("doc.bsale_document_type_id = %s")
-        params.append(document_type_id)
+        where.append("doc.bsale_document_type_id = :dt_id")
+        params["dt_id"] = document_type_id
     if office_id:
         # filtro explicito (override) — respetar lo que pase el frontend
-        where.append("doc.bsale_office_id = %s")
-        params.append(office_id)
+        where.append("doc.bsale_office_id = :office_id")
+        params["office_id"] = office_id
     else:
         # filtro por defecto — solo sucursales activas
         where.append(f"doc.bsale_office_id IN ({_OFFICE_IDS_SQL})")
+        
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
-    total = fetch_scalar(f"SELECT COUNT(*) FROM documents doc {where_sql}", tuple(params)) or 0
+    total_res = await db.execute(text(f"SELECT COUNT(*) FROM documents doc {where_sql}"), params)
+    total = total_res.scalar() or 0
 
-    rows = fetch_all(f"""
+    params["limit"] = limit
+    params["offset"] = offset
+    
+    rows_res = await db.execute(text(f"""
         SELECT doc.bsale_document_id, doc.serial_number, doc.doc_number, doc.emission_date,
                doc.total_amount, doc.bsale_office_id, o.name AS office_name,
                dt.name AS document_type_name, doc.is_credit_note
@@ -58,47 +74,62 @@ def list_documents(
         LEFT JOIN document_types dt  ON dt.bsale_document_type_id = doc.bsale_document_type_id
         {where_sql}
         ORDER BY doc.emission_date DESC
-        LIMIT %s OFFSET %s
-    """, tuple(params) + (limit, offset))
+        LIMIT :limit OFFSET :offset
+    """), params)
+    
+    rows = [dict(r) for r in rows_res.mappings().all()]
 
     return {"total": total, "limit": limit, "offset": offset, "items": rows}
 
 
 @router.get("/{doc_id}")
-def get_document(doc_id: int) -> dict:
-    doc = fetch_one("""
+async def get_document(doc_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    doc_res = await db.execute(text("""
         SELECT doc.*, dt.name AS document_type_name, o.name AS office_name
         FROM documents doc
         LEFT JOIN document_types dt ON dt.bsale_document_type_id = doc.bsale_document_type_id
         LEFT JOIN offices o         ON o.bsale_office_id = doc.bsale_office_id
-        WHERE doc.bsale_document_id = %s
-    """, (doc_id,))
-    if not doc:
+        WHERE doc.bsale_document_id = :doc_id
+    """), {"doc_id": doc_id})
+    doc_row = doc_res.mappings().first()
+    
+    if not doc_row:
         raise HTTPException(404, "Documento no encontrado")
 
-    doc["detalles"] = fetch_all("""
+    doc = dict(doc_row)
+    
+    detalles_res = await db.execute(text("""
         SELECT dd.bsale_variant_id, v.code, p.name AS producto,
                dd.quantity, dd.net_unit_value, dd.total_amount
         FROM document_details dd
         LEFT JOIN variants v  ON v.bsale_variant_id = dd.bsale_variant_id
         LEFT JOIN products p  ON p.bsale_product_id = v.bsale_product_id
-        WHERE dd.bsale_document_id = %s
-    """, (doc_id,))
+        WHERE dd.bsale_document_id = :doc_id
+    """), {"doc_id": doc_id})
+    
+    doc["detalles"] = [dict(r) for r in detalles_res.mappings().all()]
     return doc
 
 
 @router.get("/stats/summary")
-def documents_summary() -> dict:
+async def documents_summary(db: AsyncSession = Depends(get_db)) -> dict:
+    total_docs = await db.execute(text("SELECT COUNT(*) FROM documents"))
+    total_dets = await db.execute(text("SELECT COUNT(*) FROM document_details"))
+    mas_reciente = await db.execute(text("SELECT MAX(emission_date) FROM documents"))
+    mas_antiguo = await db.execute(text("SELECT MIN(emission_date) FROM documents"))
+    
+    por_tipo_res = await db.execute(text("""
+        SELECT dt.name AS tipo, COUNT(*) AS cantidad
+        FROM documents doc
+        LEFT JOIN document_types dt ON dt.bsale_document_type_id = doc.bsale_document_type_id
+        GROUP BY dt.name
+        ORDER BY cantidad DESC
+    """))
+    
     return {
-        "total_documentos": fetch_scalar("SELECT COUNT(*) FROM documents"),
-        "total_detalles":   fetch_scalar("SELECT COUNT(*) FROM document_details"),
-        "mas_reciente":     fetch_scalar("SELECT MAX(emission_date) FROM documents"),
-        "mas_antiguo":      fetch_scalar("SELECT MIN(emission_date) FROM documents"),
-        "por_tipo": fetch_all("""
-            SELECT dt.name AS tipo, COUNT(*) AS cantidad
-            FROM documents doc
-            LEFT JOIN document_types dt ON dt.bsale_document_type_id = doc.bsale_document_type_id
-            GROUP BY dt.name
-            ORDER BY cantidad DESC
-        """),
+        "total_documentos": total_docs.scalar() or 0,
+        "total_detalles":   total_dets.scalar() or 0,
+        "mas_reciente":     mas_reciente.scalar(),
+        "mas_antiguo":      mas_antiguo.scalar(),
+        "por_tipo":         [dict(r) for r in por_tipo_res.mappings().all()],
     }
