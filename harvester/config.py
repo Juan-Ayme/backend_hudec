@@ -61,13 +61,37 @@ DB_CONFIG: dict = {
 
 
 # =============================================================================
-# SUCURSALES CONOCIDAS
+# SUCURSALES CONOCIDAS Y PARÁMETROS OPERATIVOS
 # =============================================================================
 
 # IDs de BSale para las sucursales de tienda (donde se hacen ventas al publico).
 # Se usan en los reportes de ventas para EXCLUIR el almacen.
-# Magdalena = 1 | Asamblea = 3
-OFFICES_TIENDA: list[int] = [1, 3]
+OFFICES_TIENDA: list[int] = [
+    int(x.strip()) for x in os.environ.get("OFFICES_TIENDA", "1,3").split(",") if x.strip()
+]
 
 # ID del Almacen Central. Solo recibe recepciones, no hace ventas directas.
-OFFICE_ALMACEN: int = 4
+OFFICE_ALMACEN: int = int(os.environ.get("OFFICE_ALMACEN", "4"))
+
+# IDs de documentos de venta y devoluciones de BSale
+TIPOS_VENTA: list[int] = [
+    int(x.strip()) for x in os.environ.get("TIPOS_VENTA", "1,10,50,51,52,53").split(",") if x.strip()
+]
+TIPOS_DEVOLUCION: list[int] = [
+    int(x.strip()) for x in os.environ.get("TIPOS_DEVOLUCION", "9,40,43").split(",") if x.strip()
+]
+
+# Exclusiones de departamentos y categorías
+EXCLUDED_DEPARTMENTS: list[int] = [
+    int(x.strip()) for x in os.environ.get("EXCLUDED_DEPARTMENTS", "11,12").split(",") if x.strip()
+]
+EXCLUDED_CATEGORIES: list[int] = [
+    int(x.strip()) for x in os.environ.get("EXCLUDED_CATEGORIES", "73,74,75,76").split(",") if x.strip()
+]
+
+# IDs de categorías objetivo a analizar (para el reporte de salud)
+TARGET_CATEGORIES: list[int] = [
+    int(x.strip()) for x in os.environ.get("TARGET_CATEGORIES", "228,221,145").split(",") if x.strip()
+]
+
+

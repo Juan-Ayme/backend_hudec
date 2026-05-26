@@ -20,7 +20,7 @@ from app.kawii_matrix.schemas import (
 )
 
 
-router = APIRouter(prefix="/kawii-matrix", tags=["kawii-matrix"])
+router = APIRouter(prefix="/matrix", tags=["matrix"])
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/kawii-matrix", tags=["kawii-matrix"])
     summary="Ejecuta una matriz KAWII y devuelve los SKUs clasificados",
 )
 async def get_matrix(
-    module_id: str = Path(..., pattern="^(04|05|06|07)$", description="ID del módulo"),
+    module_id: str = Path(..., pattern="^(04|04b|05|06|07)$", description="ID del módulo"),
     sucursal: str | None = Query(None, description="Filtro: Magdalena, Asamblea"),
     departamento: str | None = Query(None, description="Filtro por nombre de departamento"),
     categoria: str | None = Query(None, description="Filtro por categoría"),
@@ -54,6 +54,7 @@ async def get_matrix(
     """
     Módulos disponibles:
       - **04**: Matriz 90d (foto operativa — 90 días, vista por sucursal)
+      - **04b**: Matriz 90d Jerárquica (+ totales en S/ por Subcat/Cat/Depto)
       - **05**: Matriz Operativa (90d + contexto lifetime + IC)
       - **06**: Histórico Productos (lifetime, autopsia de ciclo de vida)
       - **07**: Informe Consolidado (jerárquico DEPT→CAT→SUBCAT→SKU con ABC Pareto)
@@ -88,7 +89,7 @@ async def get_matrix(
     summary="Distribución de SKUs por etiqueta de clasificación",
 )
 async def get_distribution(
-    module_id: str = Path(..., pattern="^(04|05|06|07)$"),
+    module_id: str = Path(..., pattern="^(04|04b|05|06|07)$"),
     sucursal: str | None = Query(None, description="Filtro opcional por sucursal"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -112,7 +113,7 @@ async def get_distribution(
     summary="Sugerencias de transferencia inter-sucursal (solo módulos 04 y 05)",
 )
 async def get_transfers(
-    module_id: str = Path(..., pattern="^(04|05)$"),
+    module_id: str = Path(..., pattern="^(04|04b|05)$"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -135,7 +136,7 @@ async def get_transfers(
     summary="Agrupa SKUs por acción de negocio (urgente/reponer/descatalogar/...)",
 )
 async def get_action_groups(
-    module_id: str = Path(..., pattern="^(04|05|06|07)$"),
+    module_id: str = Path(..., pattern="^(04|04b|05|06|07)$"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -187,31 +188,37 @@ async def list_modules():
                 "id": "04",
                 "name": "Matriz 90d",
                 "description": "Foto operativa del 'ahora' (ventana 90 días, por sucursal)",
-                "endpoint": "/kawii-matrix/04",
+                "endpoint": "/matrix/04",
+            },
+            {
+                "id": "04b",
+                "name": "Matriz 90d Jerárquica",
+                "description": "Matriz 90d + totales en S/ por Subcategoría, Categoría y Departamento",
+                "endpoint": "/matrix/04b",
             },
             {
                 "id": "05",
                 "name": "Matriz Operativa Enriquecida",
                 "description": "Matriz 90d + contexto lifetime (Mejor Mes, IC, Sell-Through Lifetime)",
-                "endpoint": "/kawii-matrix/05",
+                "endpoint": "/matrix/05",
             },
             {
                 "id": "06",
                 "name": "Histórico Productos",
                 "description": "Autopsia lifetime: ciclo de vida completo del SKU",
-                "endpoint": "/kawii-matrix/06",
+                "endpoint": "/matrix/06",
             },
             {
                 "id": "07",
                 "name": "Informe Consolidado",
                 "description": "Vista jerárquica DEPT→CAT→SUBCAT→SKU con ABC Pareto",
-                "endpoint": "/kawii-matrix/07",
+                "endpoint": "/matrix/07",
             },
         ],
         "endpoints_especiales": {
-            "summary": "/kawii-matrix/_/summary",
-            "distribution": "/kawii-matrix/{module_id}/distribution",
-            "transfers": "/kawii-matrix/{module_id}/transfers",
-            "action_groups": "/kawii-matrix/{module_id}/action-groups",
+            "summary": "/matrix/_/summary",
+            "distribution": "/matrix/{module_id}/distribution",
+            "transfers": "/matrix/{module_id}/transfers",
+            "action_groups": "/matrix/{module_id}/action-groups",
         },
     }

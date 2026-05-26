@@ -35,7 +35,7 @@ from app.routers import (
     taxonomy,
     taxonomy_admin,
 )
-from app.kawii_matrix.router import router as kawii_matrix_router
+from app.kawii_matrix.router import router as matrix_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,7 +86,7 @@ app.include_router(documents.router)
 app.include_router(analytics.router)
 app.include_router(sync.router)
 app.include_router(audits.router)
-app.include_router(kawii_matrix_router)  # /kawii-matrix/* — matrices de clasificación inteligente
+app.include_router(matrix_router)  # /matrix/* — matrices de clasificación inteligente
 
 
 # ---- Root / health ----

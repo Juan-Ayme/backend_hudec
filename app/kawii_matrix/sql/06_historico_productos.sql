@@ -13,9 +13,9 @@
 WITH params AS (
     SELECT
         NOW()                                AS ahora,
-        ARRAY[1, 3]::int[]                   AS sucursales_objetivo,
-        ARRAY[1, 10, 50, 51, 52, 53]::int[]  AS tipos_venta,
-        ARRAY[9, 40, 43]::int[]              AS tipos_devolucion
+        :sucursales_objetivo::int[]          AS sucursales_objetivo,
+        :tipos_venta::int[]                  AS tipos_venta,
+        :tipos_devolucion::int[]             AS tipos_devolucion
 ),
 -- Cada documento-detalle de venta o devolución, en una sola pasada
 movimientos AS (
@@ -143,8 +143,8 @@ consolidado AS (
     LEFT JOIN stock_actual sa ON sa.bsale_office_id = b.bsale_office_id AND sa.bsale_variant_id = b.bsale_variant_id
     LEFT JOIN top_mes tm   ON tm.bsale_office_id  = b.bsale_office_id AND tm.bsale_variant_id  = b.bsale_variant_id
     LEFT JOIN mismo_periodo_anio_anterior mp ON mp.bsale_office_id = b.bsale_office_id AND mp.bsale_variant_id = b.bsale_variant_id
-    WHERE (j.department_id IS NULL OR j.department_id NOT IN (11, 12))
-      AND (j.category_id IS NULL OR j.category_id NOT IN (73, 74, 75, 76))
+    WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(:excluded_departments::int[])))
+      AND (j.category_id IS NULL OR NOT (j.category_id = ANY(:excluded_categories::int[])))
 ),
 calculos AS (
     SELECT

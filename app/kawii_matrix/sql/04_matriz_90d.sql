@@ -8,9 +8,9 @@
 WITH params AS (
     SELECT NOW()                              AS ahora,
         NOW() - INTERVAL '90 days'           AS fecha_corte,
-        ARRAY[1, 3]::int[]                   AS sucursales_objetivo,
-        ARRAY[1, 10, 50, 51, 52, 53]::int[]  AS tipos_venta,
-        ARRAY[9, 40, 43]::int[]              AS tipos_devolucion,
+        :sucursales_objetivo::int[]          AS sucursales_objetivo,
+        :tipos_venta::int[]                  AS tipos_venta,
+        :tipos_devolucion::int[]             AS tipos_devolucion,
         7                                    AS piso_dias_lote
 ),
 ventas_diarias AS (
@@ -51,6 +51,16 @@ ventas_tendencia AS (
     FROM ventas_diarias vd CROSS JOIN params p
     GROUP BY 1, 2
 ),
+-- ★ Ventas en los ÚLTIMOS 30 DÍAS naturales.
+--    Base para "Vel últimos 30d" — refleja el comportamiento RECIENTE del SKU,
+--    útil para reposición cuando el producto está creciendo/decayendo.
+ventas_30d AS (
+    SELECT vd.bsale_office_id, vd.bsale_variant_id,
+        SUM(vd.qty_venta - vd.qty_devol) AS unds_vendidas_30d
+    FROM ventas_diarias vd CROSS JOIN params p
+    WHERE vd.fecha >= (p.ahora - INTERVAL '30 days')::date
+    GROUP BY 1, 2
+),
 stock_sucursal AS (
     SELECT bsale_office_id, bsale_variant_id,
         quantity_available AS stock_disponible,
@@ -80,6 +90,35 @@ primera_recep_total AS (
     JOIN reception_details rd USING (bsale_reception_id)
     CROSS JOIN params p
     WHERE r.bsale_office_id = ANY(p.sucursales_objetivo)
+    GROUP BY 1, 2
+),
+-- ★ Consumos LIFETIME (mermas/transferencias internas/regalos).
+--    NO son ventas pero SÍ son salidas de inventario. Usado en la regla
+--    "💎 EXITOSO PASADO" para calcular el verdadero sell-through:
+--    (ventas + consumos) / recibido. Caso XK3179: vendió 4 + consumió 2 de 6 = 100%.
+consumos_lifetime AS (
+    SELECT c.bsale_office_id, cd.bsale_variant_id,
+        SUM(cd.quantity) AS unds_consumidas_lifetime
+    FROM consumptions c
+    JOIN consumption_details cd USING (bsale_consumption_id)
+    CROSS JOIN params p
+    WHERE c.bsale_office_id = ANY(p.sucursales_objetivo)
+    GROUP BY 1, 2
+),
+-- ★ Traslados de SALIDA LIFETIME (tipo 37 = TRASLADO INTERNO).
+--    Cuando una sucursal envía mercadería a otra, sale del inventario pero
+--    NO se vende. Antes el SQL contaba esto como "recibido sin vender", inflando
+--    el sell-through aparente.
+--    Casos: 252590 (recibió 96, trasladó 48, vendió 48 → 100% real).
+traslados_lifetime AS (
+    SELECT d.bsale_office_id, dd.bsale_variant_id,
+        SUM(dd.quantity) AS unds_trasladadas_lifetime
+    FROM documents d
+    JOIN document_details dd USING (bsale_document_id)
+    CROSS JOIN params p
+    WHERE d.is_active
+      AND d.bsale_office_id = ANY(p.sucursales_objetivo)
+      AND d.bsale_document_type_id = 37  -- TRASLADO INTERNO
     GROUP BY 1, 2
 ),
 -- Ventas posteriores a la última recepción, LIMITADAS a 90d
@@ -179,7 +218,13 @@ radiografia AS (
         COALESCE(vlt.dias_con_venta_lote, 0)       AS dias_con_venta_lote,
         -- ★ Tendencia: ventas en sub-períodos 45d
         COALESCE(vt.v_recent_45d, 0)::numeric      AS v_recent_45d,
-        COALESCE(vt.v_old_45d, 0)::numeric         AS v_old_45d
+        COALESCE(vt.v_old_45d, 0)::numeric         AS v_old_45d,
+        -- ★ Ventas últimos 30d naturales (para velocidad reciente)
+        COALESCE(v30.unds_vendidas_30d, 0)::numeric AS unds_vendidas_30d,
+        -- ★ Consumos LIFETIME (mermas — para sell-through real)
+        COALESCE(cl.unds_consumidas_lifetime, 0)::numeric AS unds_consumidas_lifetime,
+        -- ★ Traslados de salida LIFETIME (tipo 37 — para sell-through real)
+        COALESCE(tl.unds_trasladadas_lifetime, 0)::numeric AS unds_trasladadas_lifetime
     FROM base b
     JOIN offices o   ON o.bsale_office_id = b.bsale_office_id
     JOIN variants v  ON v.bsale_variant_id = b.bsale_variant_id AND v.is_active
@@ -192,8 +237,11 @@ radiografia AS (
     LEFT JOIN ventas_lote_total vlt ON vlt.bsale_office_id = b.bsale_office_id AND vlt.bsale_variant_id = b.bsale_variant_id
     LEFT JOIN ventas_total_sku  vts ON vts.bsale_office_id = b.bsale_office_id AND vts.bsale_variant_id = b.bsale_variant_id
     LEFT JOIN ventas_tendencia  vt  ON vt.bsale_office_id  = b.bsale_office_id AND vt.bsale_variant_id  = b.bsale_variant_id
-    WHERE j.department_id NOT IN (11, 12)
-      AND (j.category_id IS NULL OR j.category_id NOT IN (73, 74, 75, 76))
+    LEFT JOIN ventas_30d        v30 ON v30.bsale_office_id = b.bsale_office_id AND v30.bsale_variant_id = b.bsale_variant_id
+    LEFT JOIN consumos_lifetime cl  ON cl.bsale_office_id  = b.bsale_office_id AND cl.bsale_variant_id  = b.bsale_variant_id
+    LEFT JOIN traslados_lifetime tl ON tl.bsale_office_id  = b.bsale_office_id AND tl.bsale_variant_id  = b.bsale_variant_id
+    WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(:excluded_departments::int[])))
+      AND (j.category_id IS NULL OR NOT (j.category_id = ANY(:excluded_categories::int[])))
 ),
 calc AS (
     SELECT r.*,
@@ -242,11 +290,41 @@ metricas AS (
             WHEN c.unds_lote_total <= 0 THEN NULL
             WHEN (c.stock_disponible + c.stock_reservado) = 0 THEN 0
             ELSE LEAST(9999, CEIL((c.stock_disponible + c.stock_reservado) / (c.unds_lote_total / c.dias_efectivos)))::int
-        END AS dias_cobertura
+        END AS dias_cobertura,
+        -- ★ Días con stock en los últimos 30d (Opción 2: no penaliza por agotamiento).
+        --    - Si aún tiene stock: 30 días completos
+        --    - Si se agotó: días desde (hoy-30) hasta la última venta del lote
+        --    - Si nunca vendió o se agotó hace >30d: 0
+        CASE
+            WHEN c.stock_disponible > 0 THEN 30
+            WHEN c.ult_venta_lote IS NULL THEN 0
+            WHEN c.ult_venta_lote >= ((SELECT ahora FROM params) - INTERVAL '30 days')::date
+                 THEN GREATEST(1, (c.ult_venta_lote - ((SELECT ahora FROM params) - INTERVAL '30 days')::date + 1))::int
+            ELSE 0
+        END AS dias_con_stock_30d
     FROM calc c
     LEFT JOIN totales_categoria tc
       ON tc.bsale_office_id = c.bsale_office_id
      AND tc.category = COALESCE(c.category, '(sin)')
+),
+-- ★ Velocidad reciente (últimos 30d) — Opción 2: solo cuenta días con stock.
+--    Calculada en CTE separada para reutilizar dias_con_stock_30d y mantener
+--    legibilidad en el SELECT final.
+metricas_reciente AS (
+    SELECT m.*,
+        CASE
+            WHEN m.dias_con_stock_30d > 0
+                 AND m.unds_vendidas_30d > 0
+            THEN ROUND((m.unds_vendidas_30d / m.dias_con_stock_30d)::numeric, 4)
+            ELSE NULL
+        END AS vel_30d,
+        CASE
+            WHEN m.dias_con_stock_30d > 0
+                 AND m.unds_vendidas_30d > 0
+            THEN ROUND(((m.unds_vendidas_30d / m.dias_con_stock_30d) * 30)::numeric, 2)
+            ELSE NULL
+        END AS proy_30d_reciente
+    FROM metricas m
 ),
 -- ★ Sugerencia de transferencia inter-sucursal.
 -- Detecta SKUs con EXCESO en una sucursal (cob >90d) Y DÉFICIT en la otra
@@ -262,8 +340,8 @@ transferencias AS (
             FLOOR(donor.stock_disponible - donor.proy_mes)::int,   -- excedente sobre 1 mes de demanda
             CEIL(recip.proy_mes - recip.stock_disponible)::int     -- déficit del receptor
         )) AS unidades_sugeridas
-    FROM metricas donor
-    JOIN metricas recip
+    FROM metricas_reciente donor
+    JOIN metricas_reciente recip
       ON donor.bsale_variant_id = recip.bsale_variant_id
      AND donor.bsale_office_id  <> recip.bsale_office_id
     WHERE donor.dias_cobertura > 90                                 -- donante con exceso
@@ -302,12 +380,22 @@ SELECT
                     ELSE ROUND(ventas_dia, 2)
                END)                          AS "Velocidad (uds/día)",
     trim_scale(ROUND(proy_mes, 2))           AS "Proyección 30d",
+    -- ★ Velocidad RECIENTE (últimos 30d, solo días con stock — Opción 2).
+    --    Refleja cómo rota el SKU AHORA, sin diluirse con la "cola larga" del lote.
+    --    Útil para decisiones de reposición: si vel_30d < ventas_dia → demanda cayó.
+    trim_scale(CASE WHEN vel_30d IS NULL THEN NULL
+                    WHEN vel_30d < 0.1 THEN ROUND(vel_30d, 4)
+                    ELSE ROUND(vel_30d, 2)
+               END)                          AS "Vel últimos 30d",
+    trim_scale(ROUND(proy_30d_reciente, 2))  AS "Proy 30d (reciente)",
     trim_scale(ROUND(pct_frecuencia, 1))     AS "% Frecuencia",
     dias_con_venta_lote                      AS "Días con Venta",
     dias_sin_venta_90d::int                  AS "Días sin Vender",
 
     CASE
-        WHEN unds_post_recep = 0 THEN 'Sin datos'
+        -- FIX: "Sin datos" debe depender de si el lote tuvo ventas, no de
+        -- unds_post_recep (deprecada), que marcaba "Sin datos" de más.
+        WHEN dias_con_venta_lote = 0 THEN 'Sin datos'
         WHEN pct_frecuencia >= 20  THEN 'X (Constante)'
         WHEN pct_frecuencia >= 8   THEN 'Y (Variable)'
         ELSE 'Z (Errático / Ráfaga)'
@@ -354,12 +442,14 @@ SELECT
     END AS "Sugerencia Transferencia",
 
     CASE
-        -- NUEVO: solo si NO ha vendido lo suficiente como para juzgar.
-        --    Threshold bajado a <15 para que productos como GF-3687 (vel=2.14/d, V90=15)
+        -- NUEVO: ventana de gracia de 7 días para evaluar rotación.
+        --    Cambio: bajado de 15d → 7d porque hay productos que se agotan antes
+        --    de los 7 días (deben caer en QUIEBRE STOCK o LOTE AGOTADO RÁPIDO, no en NUEVO).
+        --    Threshold <15 ventas para que productos como GF-3687 (vel=2.14/d, V90=15)
         --    salten directo a evaluación de rotación normal.
-        WHEN primera_recepcion >= NOW() - INTERVAL '15 days'
+        WHEN primera_recepcion >= NOW() - INTERVAL '7 days'
              AND unds_vendidas < 15
-             THEN '🌱 NUEVO: esperando ≥15d para evaluar rotación'
+             THEN '🌱 NUEVO: esperando ≥7d para evaluar rotación'
 
         WHEN stock_disponible = 0
              AND unds_recibidas_90d > 0
@@ -369,13 +459,64 @@ SELECT
              AND (ultima_venta::date - primera_recep_90d::date) <= 30
              THEN '🚨 QUIEBRE STOCK: Lote vendido rápido (≤30d)'
 
+        -- ★ 🔄 REABASTECIDO RECIENTE: producto que llegó hace ≤14d, aún sin venta.
+        --    NO es MUERTO — apenas tuvo tiempo de estar en góndola. Esperar antes de juzgar.
+        --    Va ANTES de MUERTO 90D para rescatar productos recién reabastecidos.
+        --    Captura casos como 74992796365390 (recibió 33 hace 2d, stock 33).
+        WHEN stock_disponible > 0
+             AND unds_vendidas = 0
+             AND dias_desde_ultima_recep IS NOT NULL
+             AND dias_desde_ultima_recep <= 14
+             THEN '🔄 REABASTECIDO RECIENTE: nueva recep (≤14d) aún sin venta — esperar'
+
         WHEN stock_disponible > 0 AND unds_vendidas = 0
              THEN '💀 MUERTO 90D: stock parado sin ventas (capital estancado)'
+
+        -- ★ ⛔ PÉRDIDA TOTAL: vendió <20% del recibido lifetime Y se perdió mucho.
+        --    Ahora considera también TRASLADOS DE SALIDA — si la mayoría del stock
+        --    salió por traslado, no es pérdida sino redistribución (no entra aquí).
+        WHEN stock_disponible = 0
+             AND unds_recibidas_lifetime >= 5
+             AND unds_consumidas_lifetime >= unds_recibidas_lifetime * 0.50
+             AND unds_vendidas_lifetime < unds_recibidas_lifetime * 0.20
+             AND unds_consumidas_lifetime > unds_trasladadas_lifetime  -- consumos > traslados (es pérdida real, no redistribución)
+             THEN '⛔ PÉRDIDA TOTAL: casi sin ventas (<20%) — todo el stock se ajustó (revisar control físico)'
+
+        -- ★ ⚠️ VENTAS CON PÉRDIDA: vendió 20-50% lifetime, pero también se perdió mucho.
+        WHEN stock_disponible = 0
+             AND unds_recibidas_lifetime >= 5
+             AND unds_consumidas_lifetime > unds_vendidas_lifetime
+             AND unds_vendidas_lifetime >= unds_recibidas_lifetime * 0.20
+             AND unds_vendidas_lifetime < unds_recibidas_lifetime * 0.50
+             AND unds_consumidas_lifetime > unds_trasladadas_lifetime  -- pérdida real, no redistribución
+             THEN '⚠️ VENTAS CON PÉRDIDA: vendía pero también se perdió mucho (investigar control físico)'
+
+        -- ★ 🔥💎 EXITOSO ACTIVO: vendió ≥80% lifetime Y SIGUE vendiendo (≤30d sin venta).
+        --    FIX v3: incluye TRASLADOS como salidas (no es pérdida, es redistribución).
+        --    Caso 252590: recibió 96, vendió 48, trasladó 48 → (48+0+48)/96 = 100% ✓
+        --    Caso KD-2892: recibió 61, vendió 30, consumió 1, trasladó 30 → (30+1+30)/61 = 100% ✓
+        WHEN stock_disponible = 0
+             AND unds_vendidas_lifetime >= 1
+             AND unds_recibidas_lifetime >= 2
+             AND (unds_vendidas_lifetime + unds_consumidas_lifetime + unds_trasladadas_lifetime) >= unds_recibidas_lifetime * 0.80
+             AND ultima_venta IS NOT NULL
+             AND dias_sin_venta_90d <= 30
+             THEN '🔥💎 EXITOSO ACTIVO: vendió todo lifetime Y sigue rotando — REPONER YA'
+
+        -- ★ 💎 EXITOSO PASADO: sell-through ≥80% (ventas + consumos + traslados) pero sin demanda reciente.
+        WHEN stock_disponible = 0
+             AND unds_vendidas_lifetime >= 1
+             AND unds_recibidas_lifetime >= 2
+             AND (unds_vendidas_lifetime + unds_consumidas_lifetime + unds_trasladadas_lifetime) >= unds_recibidas_lifetime * 0.80
+             AND edad_dias > 30
+             THEN '💎 EXITOSO PASADO: stock salió casi al 100% pero sin demanda reciente (evaluar)'
 
         -- RESIDUO HISTÓRICO: producto antiguo (>180d) que nunca vendió en 90d con
         -- recepciones marginales (R90 <5) Y bajo volumen lifetime (<50).
         -- FIX: agregado threshold unds_vendidas_lifetime < 50 para no marcar como
         -- residuo productos exitosos antiguos (SD25167 vendió 475 unds y caía aquí).
+        -- FIX v2: la regla EXITOSO PASADO de arriba ya rescata los chicos con
+        -- sell-through ≥70%. Acá solo caen los chicos con sell-through bajo.
         WHEN stock_disponible = 0 AND unds_vendidas = 0
              AND unds_recibidas_90d BETWEEN 1 AND 4
              AND edad_dias > 180
@@ -448,9 +589,13 @@ SELECT
         -- 🔥 STOCK PREVIO VENDIDO: producto agotado con buena venta 90d.
         --    Captura DOS sub-casos:
         --      (A) Vendió MÁS de lo recibido en 90d (consumió stock viejo) — caso PL-04, MH52-91
-        --      (B) Vendió ≥70% de lo recibido en 90d con volumen alto — caso AS-3013A (77%, V90=135)
+        --      (B) Vendió ≥70% de lo recibido en 90d (sell-through) — caso AS-3013A (77%)
         --    Threshold lifetime ≥50% (tolerante con mermas/consumos no documentados).
         --    Va DESPUÉS de LOTE AGOTADO RÁPIDO para no robar casos como B1721/P0189.
+        --    FIX: el caso B exigía además "unds_vendidas >= 15", que mandaba a
+        --    'AGOTADO MARGINAL' lotes chicos vendidos al 100% (ej. FXT-2289: 13/13).
+        --    Se quitó ese piso: el sell-through ≥70% + el piso V90 ≥10 de arriba
+        --    ya aseguran buena rotación sea el lote de 13 o de 18 unidades.
         WHEN stock_disponible = 0
              AND unds_vendidas >= 10
              AND unds_recibidas_lifetime > 0
@@ -458,8 +603,7 @@ SELECT
                  unds_vendidas > unds_recibidas_90d                            -- (A) vendió stock viejo
                  OR
                  (unds_recibidas_90d >= 3                                     -- (B) sell-through 90d ≥70%
-                  AND unds_vendidas >= unds_recibidas_90d * 0.70
-                  AND unds_vendidas >= 15)
+                  AND unds_vendidas >= unds_recibidas_90d * 0.70)
              )
              AND (
                  unds_vendidas_lifetime >= unds_recibidas_lifetime * 0.50      -- vida ≥50% (laxo por mermas)
@@ -467,22 +611,68 @@ SELECT
              )
              THEN '🔥 STOCK PREVIO VENDIDO: vendió del stock viejo (buena vida → reponer)'
 
+        -- ★ 🔄 REABASTECIDO ACTIVO: stock fresco (≤14d) + cobertura aparente alta (>45d).
+        --    Captura productos cuya cobertura está INFLADA por período sin stock previo.
+        --    Aplica si cumple UNA de 2 condiciones:
+        --      A) Velocidad real reciente (desde recep) ≥10/mes — vende bien AHORA
+        --      B) Historial lifetime excelente (sell-through ≥70%) — vendió bien antes
+        --    Caso B (360207): vendió 25 de 31 lifetime (80%), recibió hace 4d, vendió 1 →
+        --    la vel reciente es baja pero el historial demuestra que rota cuando hay stock.
+        WHEN stock_disponible > 0
+             AND dias_desde_ultima_recep IS NOT NULL
+             AND dias_desde_ultima_recep <= 14
+             AND dias_cobertura > 45
+             AND (
+                 -- Caso A: vel real reciente buena
+                 (unds_vendidas_30d >= 2
+                  AND (unds_vendidas_30d::numeric / GREATEST(1, dias_desde_ultima_recep::numeric)) * 30 >= 10)
+                 OR
+                 -- Caso B: historial lifetime excelente (≥70% sell-through, ≥10 ventas)
+                 (unds_vendidas_lifetime >= 10
+                  AND unds_recibidas_lifetime > 0
+                  AND unds_vendidas_lifetime >= unds_recibidas_lifetime * 0.70)
+             )
+             THEN '🔄 REABASTECIDO ACTIVO: vende bien (cob aparente alta es por vel diluida)'
+
+        -- ★ FIX (tendencia): un producto de bajo volumen (proy <10) pero con
+        --   tendencia POSITIVA — creciendo (📈) o emergente con historia — NO debe
+        --   mandarse a liquidar. La velocidad promedio del lote lo subestima;
+        --   las ventas recientes (45d) muestran que va en alza.
+        --   FIX v3: el caso v_old_45d=0 ahora exige sell-through ≥50% del recibido.
+        --   Productos como HO2131ORG (31d, vendió 2 de 18 = 11%) NO son "alza" —
+        --   pasaron 30+ días y no rotan, deben caer en BAJA ROTACIÓN.
+        WHEN proy_mes < 10
+             AND v_recent_45d > 0
+             AND (
+                 -- 📈 Creciendo real: requiere historial previo Y aceleración ≥1.5x
+                 (v_old_45d > 0 AND v_recent_45d > v_old_45d * 1.5)
+                 OR
+                 -- 🆕 Emergente CON tracción: >30d Y vendió ≥50% del recibido lifetime
+                 (v_old_45d = 0 AND edad_dias > 30
+                  AND unds_recibidas_lifetime > 0
+                  AND unds_vendidas_lifetime >= unds_recibidas_lifetime * 0.50)
+             )
+             THEN '📈 BAJO VOLUMEN EN ALZA: vende poco pero la tendencia es positiva — observar, no liquidar'
+
         -- AGOTADO HACE TIEMPO: dividido en CUATRO casos para acción precisa:
         --   (1) AGOTADO POTENCIAL ACTIVO: lifetime ≥50 Y V90 ≥5 → reponer prioridad (demanda persiste)
         --   (2) AGOTADO HISTÓRICO: lifetime ≥50 pero V90 <5 → vendió en su vida pero demanda decayó
         --   (3) PRODUCTO EMERGENTE: V90 ≥15 pero lifetime <50 → corto historial, evaluar
         --   (4) AGOTADO MARGINAL: bajo volumen total → candidato a descatalogar
-        WHEN stock_disponible = 0 AND dias_sin_venta_90d >= 15
+        --   FIX: el filtro usa COALESCE(dias_sin_venta_90d, 9999) para incluir
+        --   productos con V90=0 (ventas netas 0 por devoluciones); antes el NULL
+        --   los dejaba afuera y caían mal en FALSO AGOTADO.
+        WHEN stock_disponible = 0 AND COALESCE(dias_sin_venta_90d, 9999) >= 15
              AND unds_vendidas_lifetime >= 50
              AND unds_vendidas >= 5
              THEN '👻 AGOTADO POTENCIAL ACTIVO: vendió ≥50 lifetime y aún en demanda (reponer prioridad)'
-        WHEN stock_disponible = 0 AND dias_sin_venta_90d >= 15
+        WHEN stock_disponible = 0 AND COALESCE(dias_sin_venta_90d, 9999) >= 15
              AND unds_vendidas_lifetime >= 50
              THEN '💤 AGOTADO HISTÓRICO: vendió bien en vida pero demanda decayó (evaluar descatalogar)'
-        WHEN stock_disponible = 0 AND dias_sin_venta_90d >= 15
+        WHEN stock_disponible = 0 AND COALESCE(dias_sin_venta_90d, 9999) >= 15
              AND unds_vendidas >= 15
              THEN '🌿 PRODUCTO EMERGENTE: vendió ≥15 en 90d pero corto historial lifetime (evaluar reposición)'
-        WHEN stock_disponible = 0 AND dias_sin_venta_90d >= 15
+        WHEN stock_disponible = 0 AND COALESCE(dias_sin_venta_90d, 9999) >= 15
              THEN '🪦 AGOTADO MARGINAL: bajo volumen lifetime (<50 unds) — candidato a descatalogar'
 
         -- Regla 45d: SOLO si el producto realmente no rota (proy_mes < 10).
@@ -496,8 +686,16 @@ SELECT
         WHEN stock_disponible = 0 AND proy_mes < 10
              THEN '👻 FALSO AGOTADO: baja rotación + sin stock'
 
+        -- ⚠️ STOCK CRÍTICO con venta RECIENTE → SÍ reponer aunque la rotación
+        --    promedio sea baja. Captura productos como Sapolio (stock 3, vendió 3
+        --    en últimos 30d, vel_30d=0.1): la cobertura es 17d y va a agotarse.
         WHEN dias_cobertura IS NOT NULL AND dias_cobertura < 30 AND proy_mes < 10
-             THEN '⚠️ STOCK CRÍTICO pero BAJA ROTACIÓN (no urgir)'
+             AND vel_30d IS NOT NULL AND vel_30d > 0
+             THEN '⚠️ STOCK CRÍTICO: poco stock + venta reciente (reponer aunque rotación baja)'
+
+        -- ⚠️ STOCK CRÍTICO SIN venta reciente → no urgir (rotación realmente baja)
+        WHEN dias_cobertura IS NOT NULL AND dias_cobertura < 30 AND proy_mes < 10
+             THEN '⚠️ STOCK CRÍTICO pero BAJA ROTACIÓN (sin venta reciente — no urgir)'
 
         WHEN proy_mes < 10
              THEN '🐢 BAJA ROTACIÓN (proy <10 unds/mes — bajar pedido / revisar surtido)'
@@ -510,6 +708,16 @@ SELECT
         --   - proy 10-29/mes → ROTACIÓN ACTIVA (vende constante pero volumen modesto)
         -- Resuelve 142 productos con vel <1/día que se mostraban como "alta rotación"
         -- siendo en realidad rotación activa de bajo volumen.
+
+        -- ★ 🔥📉 ALTA ROTACIÓN DECAYENDO: vende mucho PERO la demanda está cayendo
+        --    (v_recent_45d < v_old_45d * 0.7). Si compras al ritmo del lote completo
+        --    vas a sobre-stockearte. Reponer al ritmo de los últimos 30d (proy reciente).
+        --    Va ANTES de las 3 reglas ALTA ROTACIÓN X/Y/Z para atraparlas todas.
+        WHEN stock_disponible > 0 AND proy_mes >= 30 AND dias_cobertura < 30
+             AND v_recent_45d > 0 AND v_old_45d > 0
+             AND v_recent_45d < v_old_45d * 0.7
+             THEN '🔥📉 ALTA ROTACIÓN DECAYENDO (reducir reposición — usar Vel 30d)'
+
         WHEN stock_disponible > 0 AND proy_mes >= 30 AND dias_cobertura < 30 AND pct_frecuencia >= 20
              THEN '🔥 ALTA ROTACIÓN X (compra constante, vol ≥30/mes)'
         WHEN stock_disponible > 0 AND proy_mes >= 30 AND dias_cobertura < 30 AND pct_frecuencia < 8
@@ -524,17 +732,27 @@ SELECT
         WHEN stock_disponible > 0 AND proy_mes >= 10 AND dias_cobertura < 30
              THEN '💫 ROTACIÓN ACTIVA Y (vol 10-29/mes, variable)'
 
+        -- ★ FIX: escala compactada (Opción A). MEDIA ROTACIÓN eliminada.
+        --    SANO: 30-45d (antes 46-90d). EXCESO: >45d (antes >90d).
+        --    Razón operativa: un producto con cob >45d ya es capital estancado.
         WHEN stock_disponible > 0 AND proy_mes >= 10 AND dias_cobertura BETWEEN 30 AND 45
-             THEN '⚡ MEDIA ROTACIÓN (cob 30-45d — mantener pedido actual)'
-        WHEN stock_disponible > 0 AND proy_mes >= 10 AND dias_cobertura BETWEEN 46 AND 90
-             THEN '🟢 INVENTARIO SANO (cob 46-90d — ritmo normal)'
-        WHEN stock_disponible > 0 AND proy_mes >= 10 AND dias_cobertura > 90
+             THEN '🟢 INVENTARIO SANO (cob 30-45d — ritmo normal)'
+
+        -- ★ 🧊📉 EXCESO LIQUIDAR: exceso (cob >45d) + demanda en caída.
+        --    Doble alerta: capital estancado Y la demanda se está enfriando.
+        --    Va ANTES de EXCESO DE INVENTARIO para separar los casos urgentes.
+        WHEN stock_disponible > 0 AND proy_mes >= 10 AND dias_cobertura > 45
+             AND v_recent_45d > 0 AND v_old_45d > 0
+             AND v_recent_45d < v_old_45d * 0.7
+             THEN '🧊📉 EXCESO LIQUIDAR: capital estancado + demanda cayendo (promocionar urgente)'
+
+        WHEN stock_disponible > 0 AND proy_mes >= 10 AND dias_cobertura > 45
              THEN '🧊 EXCESO DE INVENTARIO (capital estancado)'
 
         ELSE '⚖️ EN ANÁLISIS: caso no cubierto por reglas — revisar manualmente'
-    END                       AS "Clasificación KAWII"
+     END                       AS "Clasificación"
 
-FROM metricas m
+FROM metricas_reciente m
 LEFT JOIN transferencias t
   ON t.donor_office = m.bsale_office_id
  AND t.variant_id   = m.bsale_variant_id

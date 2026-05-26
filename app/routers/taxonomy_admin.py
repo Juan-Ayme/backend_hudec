@@ -23,10 +23,12 @@ from datetime import datetime, timezone
 import re
 import unicodedata
 
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import Depends, APIRouter, HTTPException, Path
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, text
 from pydantic import BaseModel, Field
 
-from app.database import fetch_all, fetch_one, fetch_scalar, get_conn
+from app.database import get_db
 
 router = APIRouter(prefix="/taxonomy", tags=["taxonomy-admin"])
 
@@ -35,24 +37,24 @@ router = APIRouter(prefix="/taxonomy", tags=["taxonomy-admin"])
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _slugify(text: str) -> str:
+async def _slugify(text: str) -> str:
     """Convierte 'Hogar y Decoración' -> 'hogar-y-decoracion'."""
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^a-zA-Z0-9\s-]", "", text).strip().lower()
     return re.sub(r"[\s-]+", "-", text) or "sin-nombre"
 
 
-def _now() -> str:
+async def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _report(operation: str, entity: dict | None, rows: int = 1,
+async def _report(operation: str, entity: dict | None, rows: int = 1,
             scope: str = "internal_db", warnings: list[str] | None = None) -> dict:
     """Construye un informe JSON estándar."""
     return {
         "ok": True,
         "operation": operation,
-        "timestamp": _now(),
+        "timestamp": await _now(),
         "entity": entity,
         "report": {
             "rows_affected": rows,
@@ -89,49 +91,53 @@ class RenameIn(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/departments", status_code=201)
-def create_department(body: DepartmentIn) -> dict:
-    existing = fetch_one("SELECT id FROM departments WHERE name = %s", (body.name,))
+async def create_department(body: DepartmentIn, db: AsyncSession = Depends(get_db)) -> dict:
+    res = await db.execute(text("SELECT id FROM departments WHERE name = :name"), {"name": body.name})
+    existing = res.scalar()
     if existing:
         raise HTTPException(409, f"Ya existe un departamento con nombre '{body.name}'")
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO departments (name, slug) VALUES (%s, %s) RETURNING id",
-            (body.name, _slugify(body.name)),
-        )
-        new_id = cur.fetchone()[0]
+    slug = await _slugify(body.name)
+    res = await db.execute(
+        text("INSERT INTO departments (name, slug) VALUES (:name, :slug) RETURNING id"),
+        {"name": body.name, "slug": slug}
+    )
+    await db.commit()
+    new_id = res.scalar()
 
-    entity = fetch_one("SELECT id, name, slug FROM departments WHERE id = %s", (new_id,))
-    return _report("create_department", entity)
+    entity_res = await db.execute(text("SELECT id, name, slug FROM departments WHERE id = :id"), {"id": new_id})
+    entity = dict(entity_res.mappings().first())
+    return await _report("create_department", entity)
 
 
 @router.patch("/departments/{dep_id}")
-def rename_department(dep_id: int, body: RenameIn) -> dict:
-    if not fetch_scalar("SELECT 1 FROM departments WHERE id = %s", (dep_id,)):
+async def rename_department(dep_id: int, body: RenameIn, db: AsyncSession = Depends(get_db)) -> dict:
+    exists_res = await db.execute(text("SELECT 1 FROM departments WHERE id = :id"), {"id": dep_id})
+    if not exists_res.scalar():
         raise HTTPException(404, f"Departamento {dep_id} no existe")
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE departments SET name = %s, slug = %s WHERE id = %s",
-            (body.name, _slugify(body.name), dep_id),
-        )
+    slug = await _slugify(body.name)
+    await db.execute(
+        text("UPDATE departments SET name = :name, slug = :slug WHERE id = :id"),
+        {"name": body.name, "slug": slug, "id": dep_id}
+    )
+    await db.commit()
 
-    entity = fetch_one("SELECT id, name, slug FROM departments WHERE id = %s", (dep_id,))
-    return _report("rename_department", entity)
+    entity_res = await db.execute(text("SELECT id, name, slug FROM departments WHERE id = :id"), {"id": dep_id})
+    entity = dict(entity_res.mappings().first())
+    return await _report("rename_department", entity)
 
 
 @router.delete("/departments/{dep_id}")
-def delete_department(dep_id: int, force: bool = False) -> dict:
-    """
-    Elimina un departamento. Sólo permite si no tiene categorías
-    (a menos que force=true, lo cual hace cascada en mi BD pero NO en BSale).
-    """
-    dept = fetch_one("SELECT id, name FROM departments WHERE id = %s", (dep_id,))
-    if not dept:
+async def delete_department(dep_id: int, force: bool = False, db: AsyncSession = Depends(get_db)) -> dict:
+    dept_res = await db.execute(text("SELECT id, name FROM departments WHERE id = :id"), {"id": dep_id})
+    dept_row = dept_res.mappings().first()
+    if not dept_row:
         raise HTTPException(404, f"Departamento {dep_id} no existe")
+    dept = dict(dept_row)
 
-    n_cats = fetch_scalar("SELECT COUNT(*) FROM categories WHERE department_id = %s",
-                          (dep_id,)) or 0
+    n_cats_res = await db.execute(text("SELECT COUNT(*) FROM categories WHERE department_id = :id"), {"id": dep_id})
+    n_cats = n_cats_res.scalar() or 0
     warnings = []
     if n_cats > 0 and not force:
         raise HTTPException(
@@ -142,10 +148,10 @@ def delete_department(dep_id: int, force: bool = False) -> dict:
     if n_cats > 0:
         warnings.append(f"Cascada: se eliminaron {n_cats} categorias y sus subcategorias")
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM departments WHERE id = %s", (dep_id,))
+    await db.execute(text("DELETE FROM departments WHERE id = :id"), {"id": dep_id})
+    await db.commit()
 
-    return _report("delete_department", dept, warnings=warnings)
+    return await _report("delete_department", dept, warnings=warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -153,71 +159,78 @@ def delete_department(dep_id: int, force: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.post("/categories", status_code=201)
-def create_category(body: CategoryIn) -> dict:
-    dept = fetch_one("SELECT id, name FROM departments WHERE id = %s",
-                     (body.department_id,))
-    if not dept:
+async def create_category(body: CategoryIn, db: AsyncSession = Depends(get_db)) -> dict:
+    dept_res = await db.execute(text("SELECT id, name FROM departments WHERE id = :id"), {"id": body.department_id})
+    dept_row = dept_res.mappings().first()
+    if not dept_row:
         raise HTTPException(404, f"Departamento {body.department_id} no existe")
+    dept = dict(dept_row)
 
-    existing = fetch_one(
-        "SELECT id FROM categories WHERE department_id = %s AND name = %s",
-        (body.department_id, body.name),
+    existing_res = await db.execute(
+        text("SELECT id FROM categories WHERE department_id = :did AND name = :name"),
+        {"did": body.department_id, "name": body.name}
     )
-    if existing:
+    if existing_res.scalar():
         raise HTTPException(
             409,
             f"Ya existe una categoría '{body.name}' dentro del departamento '{dept['name']}'",
         )
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO categories (department_id, name, slug)
-               VALUES (%s, %s, %s) RETURNING id""",
-            (body.department_id, body.name,
-             _slugify(f"{dept['name']}-{body.name}")),
-        )
-        new_id = cur.fetchone()[0]
+    slug = await _slugify(f"{dept['name']}-{body.name}")
+    res = await db.execute(
+        text("INSERT INTO categories (department_id, name, slug) VALUES (:did, :name, :slug) RETURNING id"),
+        {"did": body.department_id, "name": body.name, "slug": slug}
+    )
+    await db.commit()
+    new_id = res.scalar()
 
-    entity = fetch_one("""
+    entity_res = await db.execute(text("""
         SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
         FROM categories c JOIN departments d ON d.id = c.department_id
-        WHERE c.id = %s
-    """, (new_id,))
-    return _report("create_category", entity)
+        WHERE c.id = :id
+    """), {"id": new_id})
+    entity = dict(entity_res.mappings().first())
+    return await _report("create_category", entity)
 
 
 @router.patch("/categories/{cat_id}")
-def rename_category(cat_id: int, body: RenameIn) -> dict:
-    cat = fetch_one("""
+async def rename_category(cat_id: int, body: RenameIn, db: AsyncSession = Depends(get_db)) -> dict:
+    cat_res = await db.execute(text("""
         SELECT c.id, c.department_id, d.name AS department_name
         FROM categories c JOIN departments d ON d.id = c.department_id
-        WHERE c.id = %s
-    """, (cat_id,))
-    if not cat:
+        WHERE c.id = :id
+    """), {"id": cat_id})
+    cat_row = cat_res.mappings().first()
+    if not cat_row:
         raise HTTPException(404, f"Categoria {cat_id} no existe")
+    cat = dict(cat_row)
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE categories SET name = %s, slug = %s WHERE id = %s",
-            (body.name, _slugify(f"{cat['department_name']}-{body.name}"), cat_id),
-        )
+    slug = await _slugify(f"{cat['department_name']}-{body.name}")
+    await db.execute(
+        text("UPDATE categories SET name = :name, slug = :slug WHERE id = :id"),
+        {"name": body.name, "slug": slug, "id": cat_id}
+    )
+    await db.commit()
 
-    entity = fetch_one("""
+    entity_res = await db.execute(text("""
         SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
         FROM categories c JOIN departments d ON d.id = c.department_id
-        WHERE c.id = %s
-    """, (cat_id,))
-    return _report("rename_category", entity)
+        WHERE c.id = :id
+    """), {"id": cat_id})
+    entity = dict(entity_res.mappings().first())
+    return await _report("rename_category", entity)
 
 
 @router.delete("/categories/{cat_id}")
-def delete_category(cat_id: int, force: bool = False) -> dict:
-    cat = fetch_one("SELECT id, name FROM categories WHERE id = %s", (cat_id,))
-    if not cat:
+async def delete_category(cat_id: int, force: bool = False, db: AsyncSession = Depends(get_db)) -> dict:
+    cat_res = await db.execute(text("SELECT id, name FROM categories WHERE id = :id"), {"id": cat_id})
+    cat_row = cat_res.mappings().first()
+    if not cat_row:
         raise HTTPException(404, f"Categoria {cat_id} no existe")
+    cat = dict(cat_row)
 
-    n_subs = fetch_scalar("SELECT COUNT(*) FROM subcategories WHERE category_id = %s",
-                          (cat_id,)) or 0
+    n_subs_res = await db.execute(text("SELECT COUNT(*) FROM subcategories WHERE category_id = :id"), {"id": cat_id})
+    n_subs = n_subs_res.scalar() or 0
     warnings = []
     if n_subs > 0 and not force:
         raise HTTPException(
@@ -228,22 +241,16 @@ def delete_category(cat_id: int, force: bool = False) -> dict:
     if n_subs > 0:
         warnings.append(f"Cascada: se eliminaron {n_subs} subcategorias")
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM categories WHERE id = %s", (cat_id,))
+    await db.execute(text("DELETE FROM categories WHERE id = :id"), {"id": cat_id})
+    await db.commit()
 
-    return _report("delete_category", cat, warnings=warnings)
+    return await _report("delete_category", cat, warnings=warnings)
 
 
 # ---------------------------------------------------------------------------
 # CLEANUP: categorias vacias (sin productos ni historial)
 # ---------------------------------------------------------------------------
 
-# Query base para detectar categorias 100% vacias.
-# Una categoria es 100% vacia cuando ningun camino la conecta a datos:
-#   - Cero product_types (BSale) con subcategory_id apuntando a sus subcats
-#   - Cero products con subcategory_id override apuntando a sus subcats
-#   - Cero products clasificados via product_type -> subcat -> esta categoria
-#   - Cero document_details (ventas) vinculados via cualquiera de los caminos
 _SQL_AUDIT_EMPTY_CATEGORIES = """
 WITH conteos AS (
   SELECT
@@ -289,27 +296,19 @@ ORDER BY departamento, categoria
 
 
 @router.get("/categories/empty/audit")
-def audit_empty_categories() -> dict:
+async def audit_empty_categories(db: AsyncSession = Depends(get_db)) -> dict:
     """
     Lista las categorias que NO tienen productos ni ventas historicas.
-
-    Una categoria se considera 'vacia' cuando todos sus contadores estan en cero:
-      - n_product_types  = 0  (ningun product_type BSale apunta a sus subcats)
-      - n_prod_override  = 0  (ningun producto con override directo)
-      - n_prod_via_pt    = 0  (ningun producto clasificado via product_type)
-      - n_ventas_total   = 0  (ninguna venta historica vinculada)
-
-    Pueden borrarse con DELETE /taxonomy/categories/empty (cleanup masivo)
-    o individualmente con DELETE /taxonomy/categories/{cat_id}?force=true.
     """
-    rows = fetch_all(_SQL_AUDIT_EMPTY_CATEGORIES)
+    res = await db.execute(text(_SQL_AUDIT_EMPTY_CATEGORIES))
+    rows = [dict(r) for r in res.mappings().all()]
     candidatos = [r for r in rows if r.get("puede_borrarse")]
     no_candidatos = [r for r in rows if not r.get("puede_borrarse")]
 
     return {
         "ok": True,
         "operation": "audit_empty_categories",
-        "timestamp": _now(),
+        "timestamp": await _now(),
         "report": {
             "total_categorias":       len(rows),
             "candidatas_a_borrar":    len(candidatos),
@@ -322,29 +321,23 @@ def audit_empty_categories() -> dict:
 
 
 @router.delete("/categories/empty")
-def delete_empty_categories(
+async def delete_empty_categories(
     confirm: bool = False,
     dry_run: bool = True,
-) -> dict:
+    db: AsyncSession = Depends(get_db)
+    ) -> dict:
     """
     Elimina TODAS las categorias 100% vacias (sin productos ni ventas).
-
-    SEGURIDAD:
-      - Por defecto corre en dry_run (NO borra, solo lista).
-      - Para borrar de verdad: ?dry_run=false&confirm=true
-      - El borrado es en cascada via FK: subcategories(category_id) ON DELETE CASCADE.
-      - product_types y products no se ven afectados (ninguno apunta a subcats vacias).
-
-    Devuelve la lista de categorias eliminadas con sus contadores antes del borrado.
     """
-    rows = fetch_all(_SQL_AUDIT_EMPTY_CATEGORIES)
+    res = await db.execute(text(_SQL_AUDIT_EMPTY_CATEGORIES))
+    rows = [dict(r) for r in res.mappings().all()]
     candidatas = [r for r in rows if r.get("puede_borrarse")]
 
     if not candidatas:
         return {
             "ok":        True,
             "operation": "delete_empty_categories",
-            "timestamp": _now(),
+            "timestamp": await _now(),
             "report":    {"eliminadas": 0, "scope": "internal_db",
                           "message": "No hay categorias 100% vacias"},
             "candidatas": [],
@@ -354,7 +347,7 @@ def delete_empty_categories(
         return {
             "ok":        True,
             "operation": "delete_empty_categories_DRY_RUN",
-            "timestamp": _now(),
+            "timestamp": await _now(),
             "report": {
                 "eliminadas":   0,
                 "candidatas":   len(candidatas),
@@ -364,19 +357,18 @@ def delete_empty_categories(
             "candidatas": candidatas,
         }
 
-    # Borrado real (cascada via FK borra subcats vacias automaticamente)
     ids = [r["cat_id"] for r in candidatas]
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM categories WHERE id = ANY(%s)",
-            (ids,),
-        )
-        rows_affected = cur.rowcount
+    await db.execute(text("DELETE FROM categories WHERE id = ANY(:ids)"), {"ids": ids})
+    await db.commit()
+    
+    # Can't easily get rowcount here without dialect-specific handling with SQLAlchemy in all cases, 
+    # but length of candidatas is the affected rowcount.
+    rows_affected = len(ids)
 
     return {
         "ok":        True,
         "operation": "delete_empty_categories",
-        "timestamp": _now(),
+        "timestamp": await _now(),
         "report": {
             "eliminadas":      rows_affected,
             "scope":           "internal_db",
@@ -391,95 +383,99 @@ def delete_empty_categories(
 # ---------------------------------------------------------------------------
 
 @router.post("/subcategories", status_code=201)
-def create_subcategory(body: SubcategoryIn) -> dict:
-    cat = fetch_one("""
+async def create_subcategory(body: SubcategoryIn, db: AsyncSession = Depends(get_db)) -> dict:
+    cat_res = await db.execute(text("""
         SELECT c.id, c.name AS cat_name, d.name AS dept_name
         FROM categories c JOIN departments d ON d.id = c.department_id
-        WHERE c.id = %s
-    """, (body.category_id,))
-    if not cat:
+        WHERE c.id = :id
+    """), {"id": body.category_id})
+    cat_row = cat_res.mappings().first()
+    if not cat_row:
         raise HTTPException(404, f"Categoria {body.category_id} no existe")
+    cat = dict(cat_row)
 
-    existing = fetch_one(
-        "SELECT id FROM subcategories WHERE category_id = %s AND name = %s",
-        (body.category_id, body.name),
+    existing_res = await db.execute(
+        text("SELECT id FROM subcategories WHERE category_id = :cid AND name = :name"),
+        {"cid": body.category_id, "name": body.name}
     )
-    if existing:
+    if existing_res.scalar():
         raise HTTPException(
             409,
             f"Ya existe la subcategoria '{body.name}' dentro de '{cat['cat_name']}'",
         )
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO subcategories (category_id, name, slug)
-               VALUES (%s, %s, %s) RETURNING id""",
-            (body.category_id, body.name,
-             _slugify(f"{cat['dept_name']}-{cat['cat_name']}-{body.name}")),
-        )
-        new_id = cur.fetchone()[0]
+    slug = await _slugify(f"{cat['dept_name']}-{cat['cat_name']}-{body.name}")
+    res = await db.execute(
+        text("INSERT INTO subcategories (category_id, name, slug) VALUES (:cid, :name, :slug) RETURNING id"),
+        {"cid": body.category_id, "name": body.name, "slug": slug}
+    )
+    await db.commit()
+    new_id = res.scalar()
 
-    entity = fetch_one("""
+    entity_res = await db.execute(text("""
         SELECT s.id, s.name, s.slug, s.category_id,
                c.name AS category_name, d.name AS department_name
         FROM subcategories s
         JOIN categories c   ON c.id = s.category_id
         JOIN departments d  ON d.id = c.department_id
-        WHERE s.id = %s
-    """, (new_id,))
-    return _report("create_subcategory", entity)
+        WHERE s.id = :id
+    """), {"id": new_id})
+    entity = dict(entity_res.mappings().first())
+    return await _report("create_subcategory", entity)
 
 
 @router.patch("/subcategories/{sub_id}")
-def rename_subcategory(sub_id: int, body: RenameIn) -> dict:
-    sub = fetch_one("""
+async def rename_subcategory(sub_id: int, body: RenameIn, db: AsyncSession = Depends(get_db)) -> dict:
+    sub_res = await db.execute(text("""
         SELECT s.id, c.name AS cat_name, d.name AS dept_name
         FROM subcategories s
         JOIN categories c  ON c.id = s.category_id
         JOIN departments d ON d.id = c.department_id
-        WHERE s.id = %s
-    """, (sub_id,))
-    if not sub:
+        WHERE s.id = :id
+    """), {"id": sub_id})
+    sub_row = sub_res.mappings().first()
+    if not sub_row:
         raise HTTPException(404, f"Subcategoria {sub_id} no existe")
+    sub = dict(sub_row)
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE subcategories SET name = %s, slug = %s WHERE id = %s",
-            (body.name,
-             _slugify(f"{sub['dept_name']}-{sub['cat_name']}-{body.name}"),
-             sub_id),
-        )
+    slug = await _slugify(f"{sub['dept_name']}-{sub['cat_name']}-{body.name}")
+    await db.execute(
+        text("UPDATE subcategories SET name = :name, slug = :slug WHERE id = :id"),
+        {"name": body.name, "slug": slug, "id": sub_id}
+    )
+    await db.commit()
 
-    entity = fetch_one("""
+    entity_res = await db.execute(text("""
         SELECT s.id, s.name, s.slug, s.category_id,
                c.name AS category_name, d.name AS department_name
         FROM subcategories s
         JOIN categories c  ON c.id = s.category_id
         JOIN departments d ON d.id = c.department_id
-        WHERE s.id = %s
-    """, (sub_id,))
-    return _report("rename_subcategory", entity)
+        WHERE s.id = :id
+    """), {"id": sub_id})
+    entity = dict(entity_res.mappings().first())
+    return await _report("rename_subcategory", entity)
 
 
 @router.delete("/subcategories/{sub_id}")
-def delete_subcategory(sub_id: int, force: bool = False) -> dict:
-    sub = fetch_one("""
+async def delete_subcategory(sub_id: int, force: bool = False, db: AsyncSession = Depends(get_db)) -> dict:
+    sub_res = await db.execute(text("""
         SELECT s.id, s.name, c.name AS cat_name, d.name AS dept_name
         FROM subcategories s
         JOIN categories c  ON c.id = s.category_id
         JOIN departments d ON d.id = c.department_id
-        WHERE s.id = %s
-    """, (sub_id,))
-    if not sub:
+        WHERE s.id = :id
+    """), {"id": sub_id})
+    sub_row = sub_res.mappings().first()
+    if not sub_row:
         raise HTTPException(404, f"Subcategoria {sub_id} no existe")
+    sub = dict(sub_row)
 
-    # Cuántos product_types y productos individuales apuntan aquí
-    n_pt = fetch_scalar(
-        "SELECT COUNT(*) FROM product_types WHERE subcategory_id = %s", (sub_id,)
-    ) or 0
-    n_prods = fetch_scalar(
-        "SELECT COUNT(*) FROM products WHERE subcategory_id = %s", (sub_id,)
-    ) or 0
+    n_pt_res = await db.execute(text("SELECT COUNT(*) FROM product_types WHERE subcategory_id = :id"), {"id": sub_id})
+    n_pt = n_pt_res.scalar() or 0
+    n_prods_res = await db.execute(text("SELECT COUNT(*) FROM products WHERE subcategory_id = :id"), {"id": sub_id})
+    n_prods = n_prods_res.scalar() or 0
+    
     refs = n_pt + n_prods
     warnings = []
     if refs > 0 and not force:
@@ -495,7 +491,7 @@ def delete_subcategory(sub_id: int, force: bool = False) -> dict:
             f"y {n_pt} product_types quedarán sin mapear"
         )
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM subcategories WHERE id = %s", (sub_id,))
+    await db.execute(text("DELETE FROM subcategories WHERE id = :id"), {"id": sub_id})
+    await db.commit()
 
-    return _report("delete_subcategory", sub, warnings=warnings)
+    return await _report("delete_subcategory", sub, warnings=warnings)

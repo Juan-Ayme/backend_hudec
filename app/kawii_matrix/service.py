@@ -1,10 +1,9 @@
 """
-Servicio que ejecuta los SQL de las matrices KAWII y aplica filtros.
+Servicio que ejecuta los SQL de las matrices de clasificación y aplica filtros.
 
-Los SQL se cargan al iniciar y se cachean en memoria (son grandes).
-Cada función expone filtros opcionales que se aplican en Python POST-query
-(porque los SQL son consultas complejas con CTEs y reescribirlas con
-parámetros sería frágil — preferimos consistencia con los reportes Excel).
+Los SQL se cargan al iniciar y se cachean en memoria.
+Las consultas SQL se ejecutan con parámetros de entorno cargados dinámicamente
+y los nombres de las columnas se mapean según la configuración de marca.
 """
 
 from __future__ import annotations
@@ -15,16 +14,17 @@ from typing import Any, Iterable
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.config import get_settings
 
 # Ruta absoluta a la carpeta sql/
 _SQL_DIR = Path(__file__).parent / "sql"
 
 MATRIX_MAP = {
-    "04": "04_matriz_90d.sql",
-    "05": "05_matriz_operativa.sql",
-    "06": "06_historico_productos.sql",
-    "07": "07_informe_consolidado.sql",
+    "04":  "04_matriz_90d.sql",
+    "04b": "04b_matriz_90d_jerarquico.sql",  # Matriz 90d + totales jerárquicos en S/
+    "05":  "05_matriz_operativa.sql",
+    "06":  "06_historico_productos.sql",
+    "07":  "07_informe_consolidado.sql",
 }
 
 
@@ -37,6 +37,47 @@ def _load_sql(module_id: str) -> str:
     if not path.exists():
         raise FileNotFoundError(f"SQL no encontrado: {path}")
     return path.read_text(encoding="utf-8")
+
+
+def _get_query_params() -> dict:
+    """Genera el diccionario de parámetros operacionales para el motor de base de datos."""
+    from harvester.config import (
+        OFFICES_TIENDA,
+        TIPOS_VENTA,
+        TIPOS_DEVOLUCION,
+        EXCLUDED_DEPARTMENTS,
+        EXCLUDED_CATEGORIES,
+    )
+    settings = get_settings()
+    return {
+        "sucursales_objetivo": OFFICES_TIENDA,
+        "tipos_venta": TIPOS_VENTA,
+        "tipos_devolucion": TIPOS_DEVOLUCION,
+        "excluded_departments": EXCLUDED_DEPARTMENTS,
+        "excluded_categories": EXCLUDED_CATEGORIES,
+        "timezone": settings.TIMEZONE,
+    }
+
+
+async def _execute_query_to_dicts(db: AsyncSession, sql: str) -> tuple[list[str], list[dict]]:
+    """Ejecuta una consulta SQL parametrizada y mapea sus columnas de clasificación dinámicamente."""
+    settings = get_settings()
+    params = _get_query_params()
+    result = await db.execute(text(sql), params)
+    
+    raw_columns = list(result.keys())
+    columns = [settings.CLASSIFICATION_LABEL if col == "Clasificación" else col for col in raw_columns]
+    raw_rows = result.fetchall()
+    
+    rows: list[dict] = []
+    for row in raw_rows:
+        row_dict = {}
+        for col_name, val in zip(raw_columns, row):
+            target_col = settings.CLASSIFICATION_LABEL if col_name == "Clasificación" else col_name
+            row_dict[target_col] = val
+        rows.append(row_dict)
+        
+    return columns, rows
 
 
 async def run_matrix(
@@ -67,12 +108,8 @@ async def run_matrix(
         }
     """
     sql = _load_sql(module_id)
-    result = await db.execute(text(sql))
-    columns = list(result.keys())
-    raw_rows = result.fetchall()
-
-    # Convertir tuplas a dicts
-    all_rows: list[dict] = [dict(zip(columns, row)) for row in raw_rows]
+    columns, all_rows = await _execute_query_to_dicts(db, sql)
+    settings = get_settings()
 
     # ---- Filtros (case-insensitive containment para texto) ----
     def _match(row: dict, col: str, value: str | None, exact: bool = False) -> bool:
@@ -99,11 +136,11 @@ async def run_matrix(
             continue
         if sku is not None and not _match(row, "Código SKU", sku, exact=True):
             continue
-        # Clasificación: puede llamarse "Clasificación KAWII", "Prioridad / Recomendación",
+        # Clasificación: puede llamarse mediante CLASSIFICATION_LABEL, "Prioridad / Recomendación",
         # "Diagnóstico Ciclo Vida" o "Diagnóstico" según el módulo. Buscamos en cualquiera.
         if clasificacion_contains is not None:
             label_cols = [
-                "Clasificación KAWII",
+                settings.CLASSIFICATION_LABEL,
                 "Prioridad / Recomendación",
                 "Diagnóstico",
                 "Diagnóstico Ciclo Vida",
@@ -148,14 +185,13 @@ async def get_distribution(
     Útil para dashboards: cuántos productos en cada categoría.
     """
     sql = _load_sql(module_id)
-    result = await db.execute(text(sql))
-    columns = list(result.keys())
-    rows = [dict(zip(columns, row)) for row in result.fetchall()]
+    columns, rows = await _execute_query_to_dicts(db, sql)
+    settings = get_settings()
 
     # Detectar columna de clasificación (varía por módulo)
     label_col = None
     for candidate in [
-        "Clasificación KAWII",
+        settings.CLASSIFICATION_LABEL,
         "Prioridad / Recomendación",
         "Diagnóstico Ciclo Vida",
     ]:
@@ -193,12 +229,10 @@ async def get_transfers(db: AsyncSession, module_id: str = "04") -> dict[str, An
         raise ValueError("Sugerencia Transferencia solo disponible en módulos 04 y 05")
 
     sql = _load_sql(module_id)
-    result = await db.execute(text(sql))
-    columns = list(result.keys())
+    columns, rows = await _execute_query_to_dicts(db, sql)
     if "Sugerencia Transferencia" not in columns:
         raise RuntimeError(f"Módulo {module_id} no tiene columna 'Sugerencia Transferencia'")
 
-    rows = [dict(zip(columns, row)) for row in result.fetchall()]
     transfers = [
         r for r in rows
         if r.get("Sugerencia Transferencia") and "Transferir" in str(r["Sugerencia Transferencia"])
@@ -214,23 +248,13 @@ async def get_action_groups(db: AsyncSession, module_id: str = "04") -> dict[str
     """
     Agrupa SKUs por ACCIÓN de negocio (no por etiqueta exacta).
     Útil para el dashboard ejecutivo.
-
-    Grupos:
-      - urgente_comprar:   QUIEBRE Alta Rotación + Lote vendido rápido
-      - reponer:           STOCK PREVIO / POTENCIAL ACTIVO / EXITOSO / LOTE AGOTADO
-      - saludable:         ALTA ROTACIÓN + ROTACIÓN ACTIVA + INVENTARIO SANO + MEDIA
-      - exceso:            EXCESO INVENTARIO
-      - liquidar:          BAJA ROT 45d + MUERTO con stock
-      - descatalogar:      MARGINAL + RESIDUO + HISTÓRICO sin demanda
-      - evaluar:           NUEVO + EMERGENTE + ESCONDIDO
     """
     sql = _load_sql(module_id)
-    result = await db.execute(text(sql))
-    columns = list(result.keys())
-    rows = [dict(zip(columns, row)) for row in result.fetchall()]
+    columns, rows = await _execute_query_to_dicts(db, sql)
+    settings = get_settings()
 
     label_col = None
-    for c in ["Clasificación KAWII", "Prioridad / Recomendación", "Diagnóstico Ciclo Vida"]:
+    for c in [settings.CLASSIFICATION_LABEL, "Prioridad / Recomendación", "Diagnóstico Ciclo Vida"]:
         if c in columns:
             label_col = c
             break
@@ -287,11 +311,9 @@ async def get_summary(db: AsyncSession) -> dict[str, Any]:
     Resumen ejecutivo combinando los 3 módulos operativos (04, 05, 07).
     Útil para mostrar en una tarjeta del dashboard.
     """
-    # Solo 04 para resumen rápido (es el más operativo)
     sql = _load_sql("04")
-    result = await db.execute(text(sql))
-    columns = list(result.keys())
-    rows = [dict(zip(columns, row)) for row in result.fetchall()]
+    columns, rows = await _execute_query_to_dicts(db, sql)
+    settings = get_settings()
 
     by_branch: dict[str, dict] = {}
     transfers_count = 0
@@ -312,7 +334,7 @@ async def get_summary(db: AsyncSession) -> dict[str, Any]:
         b = by_branch[suc]
         b["total_skus"] += 1
 
-        label = str(r.get("Clasificación KAWII") or "").upper()
+        label = str(r.get(settings.CLASSIFICATION_LABEL) or "").upper()
         if "QUIEBRE" in label and "ALTA" in label:
             b["urgente"] += 1
         elif any(k in label for k in ("STOCK PREVIO", "POTENCIAL", "EXITOSO", "LOTE AGOTADO RÁPIDO")):

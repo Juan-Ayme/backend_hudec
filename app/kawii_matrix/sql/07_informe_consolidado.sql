@@ -21,9 +21,9 @@ WITH params AS (
         NOW() - INTERVAL '15 days'           AS fecha_nuevo,
         NOW() - INTERVAL '60 days'           AS fecha_muerte,
         NOW() - INTERVAL '90 days'           AS fecha_corte,
-        ARRAY[1, 3]::int[]                   AS sucursales_objetivo,
-        ARRAY[1, 10, 50, 51, 52, 53]::int[]  AS tipos_venta,
-        ARRAY[9, 40, 43]::int[]              AS tipos_devolucion,
+        :sucursales_objetivo::int[]          AS sucursales_objetivo,
+        :tipos_venta::int[]                  AS tipos_venta,
+        :tipos_devolucion::int[]             AS tipos_devolucion,
         45::numeric                          AS cobertura_objetivo_dias,
         7                                    AS piso_dias_lote
 ),
@@ -134,8 +134,8 @@ sku_full AS (
     LEFT JOIN ventas_post_recep vpr ON vpr.bsale_variant_id = j.bsale_variant_id
                                     AND vpr.bsale_office_id = COALESCE(vl.bsale_office_id, st.bsale_office_id, rs.bsale_office_id)
     LEFT JOIN offices o ON o.bsale_office_id = COALESCE(vl.bsale_office_id, st.bsale_office_id, rs.bsale_office_id)
-    WHERE j.department_id NOT IN (11, 12)
-      AND (j.category_id IS NULL OR j.category_id NOT IN (73, 74, 75, 76))
+     WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(:excluded_departments::int[])))
+       AND (j.category_id IS NULL OR NOT (j.category_id = ANY(:excluded_categories::int[])))
       AND COALESCE(vl.bsale_office_id, st.bsale_office_id, rs.bsale_office_id) IS NOT NULL
 ),
 sku_calc AS (

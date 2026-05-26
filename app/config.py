@@ -28,9 +28,15 @@ class Settings(BaseSettings):
     )
 
     # --- Identificacion de la app ---
-    APP_NAME: str = "KAWII API"   # Aparece en /docs (Swagger) y en /health
+    APP_NAME: str = "HUDEC Inventory BI"   # Aparece en /docs (Swagger) y en /health
     APP_VERSION: str = "1.0.0"    # Version semantica
     DEBUG: bool = False           # True = logs mas detallados (NO usar en produccion)
+
+    # --- Configuracion de marca (White-label) ---
+    BRAND_NAME: str = "hudec"
+    CLASSIFICATION_LABEL: str = "Clasificación HUDEC"
+    TIMEZONE: str = "America/Lima"
+
 
     # --- CORS (Cross-Origin Resource Sharing) ---
     # Lista de origenes permitidos para hacer requests a la API desde el navegador.

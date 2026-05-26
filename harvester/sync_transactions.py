@@ -429,3 +429,103 @@ def sync_receptions() -> dict:
         raise
 
     return stats
+
+
+def sync_consumptions() -> dict:
+    """Sincroniza consumos de stock (mermas, uso interno) de todas las sucursales."""
+    log_id = db.sync_start("consumptions")
+    stats = {"fetched": 0, "inserted": 0, "skipped": 0, "details_inserted": 0}
+
+    try:
+        # Obtener offices
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT bsale_office_id FROM offices WHERE is_active = TRUE")
+                office_ids = [row[0] for row in cur.fetchall()]
+
+        for oid in office_ids:
+            items = paginate("/stocks/consumptions.json",
+                             f"&officeid={oid}&expand=%5Bdetails%5D")
+            logger.info("Consumos office %d: %d registros", oid, len(items))
+            stats["fetched"] += len(items)
+
+            cons_rows = []
+            det_rows = []
+
+            for cons in items:
+                cons_id = _safe_int(cons.get("id"))
+                if cons_id == 0:
+                    stats["skipped"] += 1
+                    continue
+
+                consumption_unix = _safe_int(cons.get("consumptionDate") or 0)
+                consumption_ts = _unix_to_ts(consumption_unix)
+                if consumption_ts is None:
+                    stats["skipped"] += 1
+                    continue
+
+                note = cons.get("note") or ""
+                office_id = _safe_int((cons.get("office") or {}).get("id"))
+
+                cons_rows.append((
+                    cons_id,
+                    office_id,
+                    consumption_ts,
+                    note or None,
+                ))
+
+                details_container = cons.get("details") or {}
+                detail_items = details_container.get("items") or []
+                detail_count = _safe_int(details_container.get("count"))
+
+                needs_deep_fetch = (
+                    len(detail_items) >= 25
+                    or (detail_count > len(detail_items))
+                )
+                if needs_deep_fetch:
+                    deep_url = f"{BSALE_BASE_URL}/stocks/consumptions/{cons_id}/details.json"
+                    detail_items = fetch_subresource(deep_url, page_size=50)
+
+                for det in detail_items:
+                    det_id = _safe_int(det.get("id"))
+                    variant_id = _safe_int((det.get("variant") or {}).get("id"))
+                    if det_id == 0 or variant_id == 0:
+                        continue
+
+                    det_rows.append((
+                        det_id,
+                        cons_id,
+                        variant_id,
+                        _safe_float(det.get("quantity")),
+                    ))
+
+            # Flush por sucursal
+            sql_cons = """
+                INSERT INTO consumptions (bsale_consumption_id, bsale_office_id,
+                                          consumption_date, note)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (bsale_consumption_id) DO UPDATE SET
+                    note = EXCLUDED.note
+            """
+            db.execute_batch(sql_cons, cons_rows)
+            stats["inserted"] += len(cons_rows)
+
+            sql_det = """
+                INSERT INTO consumption_details (id, bsale_consumption_id, bsale_variant_id, quantity)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    quantity = EXCLUDED.quantity
+            """
+            db.execute_batch(sql_det, det_rows)
+            stats["details_inserted"] += len(det_rows)
+
+        logger.info("Consumos: %d headers, %d detalles",
+                     stats["inserted"], stats["details_inserted"])
+
+        db.sync_finish(log_id, fetched=stats["fetched"],
+                        inserted=stats["inserted"], skipped=stats["skipped"])
+        return stats
+    except Exception as exc:
+        db.sync_finish(log_id, status="FAILED", error=str(exc),
+                        fetched=stats["fetched"])
+        raise

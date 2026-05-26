@@ -1,24 +1,18 @@
 """Endpoints de taxonomia: departamentos, categorias, subcategorias, arbol."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
-from app.database import fetch_all, fetch_one
+from app.database import get_db
 
 router = APIRouter(prefix="/taxonomy", tags=["taxonomy"])
 
 
 @router.get("/tree")
-def get_tree() -> dict:
-    """Arbol completo department -> category -> subcategory con conteo de productos.
-
-    El conteo cuenta cada producto considerando override individual:
-    si products.subcategory_id está seteado, se usa ese; sino el del product_type.
-    """
-    # NOTA: v_products_full ya no expone subcategory_id como columna (solo el
-    # texto subcategory). Calculamos el conteo desde las tablas base resolviendo
-    # la subcategoria efectiva: override individual del producto si existe,
-    # sino la del product_type.
-    rows = fetch_all("""
+async def get_tree(db: AsyncSession = Depends(get_db)) -> dict:
+    """Arbol completo department -> category -> subcategory con conteo de productos."""
+    query = """
         SELECT d.id   AS dep_id,   d.name   AS dep_name,
                c.id   AS cat_id,   c.name   AS cat_name,
                s.id   AS sub_id,   s.name   AS sub_name,
@@ -32,7 +26,10 @@ def get_tree() -> dict:
         LEFT JOIN categories    c ON c.department_id = d.id
         LEFT JOIN subcategories s ON s.category_id   = c.id
         ORDER BY d.name, c.name, s.name
-    """)
+    """
+    res = await db.execute(text(query))
+    rows = [dict(r) for r in res.mappings().all()]
+
     tree: dict = {}
     for r in rows:
         dep = tree.setdefault(r["dep_name"], {"id": r["dep_id"], "categorias": {}})
@@ -51,74 +48,52 @@ def get_tree() -> dict:
 
 
 @router.get("/departments")
-def list_departments() -> list[dict]:
-    return fetch_all(
-        "SELECT id, name, slug FROM departments ORDER BY name"
-    )
+async def list_departments(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    query = "SELECT id, name, slug FROM departments ORDER BY name"
+    res = await db.execute(text(query))
+    return [dict(r) for r in res.mappings().all()]
 
 
-@router.get("/departments/{dep_id}")
-def get_department(dep_id: int) -> dict:
-    dep = fetch_one(
-        "SELECT id, name, slug FROM departments WHERE id = %s", (dep_id,)
-    )
-    if not dep:
-        raise HTTPException(404, "Departamento no encontrado")
-    dep["categorias"] = fetch_all(
-        "SELECT id, name, slug FROM categories WHERE department_id = %s ORDER BY name",
-        (dep_id,),
-    )
-    return dep
+# GET /taxonomy/departments/{dep_id} eliminado — no consumido por el frontend
 
 
 @router.get("/categories")
-def list_categories(department_id: int | None = None) -> list[dict]:
+async def list_categories(department_id: int | None = None, db: AsyncSession = Depends(get_db)) -> list[dict]:
     if department_id:
-        return fetch_all(
-            """SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
-               FROM categories c
-               JOIN departments d ON d.id = c.department_id
-               WHERE c.department_id = %s ORDER BY c.name""",
-            (department_id,),
-        )
-    return fetch_all("""
-        SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
-        FROM categories c
-        JOIN departments d ON d.id = c.department_id
-        ORDER BY d.name, c.name
-    """)
+        query = """SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
+                   FROM categories c
+                   JOIN departments d ON d.id = c.department_id
+                   WHERE c.department_id = :department_id ORDER BY c.name"""
+        res = await db.execute(text(query), {"department_id": department_id})
+    else:
+        query = """
+            SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
+            FROM categories c
+            JOIN departments d ON d.id = c.department_id
+            ORDER BY d.name, c.name
+        """
+        res = await db.execute(text(query))
+    return [dict(r) for r in res.mappings().all()]
 
 
-@router.get("/categories/{cat_id}")
-def get_category(cat_id: int) -> dict:
-    cat = fetch_one("""
-        SELECT c.id, c.name, c.slug, c.department_id, d.name AS department_name
-        FROM categories c
-        JOIN departments d ON d.id = c.department_id
-        WHERE c.id = %s
-    """, (cat_id,))
-    if not cat:
-        raise HTTPException(404, "Categoria no encontrada")
-    cat["subcategorias"] = fetch_all(
-        "SELECT id, name, slug FROM subcategories WHERE category_id = %s ORDER BY name",
-        (cat_id,),
-    )
-    return cat
+# GET /taxonomy/categories/{cat_id} eliminado — no consumido por el frontend
 
 
 @router.get("/subcategories")
-def list_subcategories(category_id: int | None = None) -> list[dict]:
+async def list_subcategories(category_id: int | None = None, db: AsyncSession = Depends(get_db)) -> list[dict]:
     if category_id:
-        return fetch_all(
-            """SELECT id, name, slug, category_id FROM subcategories
-               WHERE category_id = %s ORDER BY name""",
-            (category_id,),
-        )
-    return fetch_all("""
-        SELECT s.id, s.name, s.slug, s.category_id,
-               c.name AS category_name, d.name AS department_name
-        FROM subcategories s
-        JOIN categories c    ON c.id = s.category_id
-        JOIN departments d   ON d.id = c.department_id
-        ORDER BY d.name, c.name, s.name
-    """)
+        query = """SELECT id, name, slug, category_id 
+                   FROM subcategories
+                   WHERE category_id = :category_id ORDER BY name"""
+        res = await db.execute(text(query), {"category_id": category_id})
+    else:
+        query = """
+            SELECT s.id, s.name, s.slug, s.category_id,
+                   c.name AS category_name, d.name AS department_name
+            FROM subcategories s
+            JOIN categories c    ON c.id = s.category_id
+            JOIN departments d   ON d.id = c.department_id
+            ORDER BY d.name, c.name, s.name
+        """
+        res = await db.execute(text(query))
+    return [dict(r) for r in res.mappings().all()]

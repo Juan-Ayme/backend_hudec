@@ -53,30 +53,39 @@ produccion/
 ├── Nueva_estructura/
 │   └── Estructura_inicial.json ← Taxonomía interna (fuente de verdad de categorías)
 │
-├── scripts/                    ← Scripts de mantenimiento y auditoría (uso puntual)
-│   ├── audit_final.py          ← Auditoría completa ventas BSale vs Postgres
-│   ├── audit_deep.py           ← Auditoría profunda por día
-│   ├── audit_detail.py         ← Detalle de discrepancias en documentos
-│   ├── audit_ventas_7d.py      ← Auditoría ventas últimos 7 días
-│   ├── clean_bsale_categories.py ← Limpia categorías BSale sin productos
-│   ├── fix_db.py               ← Correcciones puntuales de datos en Postgres
-│   ├── map_orphans.py          ← Mapea product_types huérfanos a la taxonomía
-│   ├── simulacro_limpieza_product_types.py ← Simulacro (dry-run) de limpieza
-│   ├── update_all.py           ← Actualización masiva de categorías en BSale vía API
-│   ├── verify_bsale_sales.py   ← Verifica ventas contra BSale
-│   └── verify_doctypes.py      ← Verifica tipos de documento
+├── tools/                      ← Scripts de mantenimiento y auditoría (uso puntual)
+│   ├── audits/                 ← Auditorías de datos
+│   │   ├── audit_deep.py
+│   │   ├── audit_detail.py
+│   │   ├── audit_final.py
+│   │   ├── audit_ventas_7d.py
+│   │   ├── verify_bsale_sales.py
+│   │   └── verify_doctypes.py
+│   ├── maintenance/            ← Limpieza y correcciones
+│   │   ├── clean_bsale_categories.py
+│   │   ├── fix_db.py
+│   │   ├── simulacro_limpieza_product_types.py
+│   │   └── update_all.py
+│   └── taxonomy/               ← Mapeo de categorías
+│       └── map_orphans.py
 │
-├── analytics_scripts/          ← Scripts de análisis pesado (generan reportes)
-│   ├── config.py               ← Config compartida de analytics
-│   ├── db_helper.py            ← Helpers de conexión para analytics
-│   ├── inventory_analysis.py   ← Análisis de inventario (rotación, valorización)
-│   ├── ticket_analysis.py      ← Análisis de ticket promedio
-│   ├── ticket_diagnostico.py   ← Diagnóstico detallado de tickets
-│   ├── cleanup_basale.py       ← Limpieza de datos BSale
-│   ├── cleanup_empty_categories.py ← Elimina categorías vacías de la DB
-│   ├── diagnostico_basale.py   ← Diagnóstico general BSale vs Postgres
-│   ├── generate_report.py      ← Genera informe PDF completo
-│   └── run_all.py              ← Ejecuta todos los análisis en secuencia
+├── analytics/                  ← Módulo de análisis y reportes
+│   ├── core/                   ← Configuración y helpers base
+│   │   ├── config.py
+│   │   └── db_helper.py
+│   ├── logic/                  ← Lógica de cálculo (ticket, inventario)
+│   │   ├── inventory_analysis.py
+│   │   ├── ticket_analysis.py
+│   │   └── ticket_diagnostico.py
+│   ├── maintenance/            ← Scripts de limpieza analítica
+│   │   ├── cleanup_basale.py
+│   │   ├── cleanup_empty_categories.py
+│   │   └── diagnostico_basale.py
+│   ├── reports/                ← Generación de informes (PDF, CLI, Excel)
+│   │   ├── excel/              ← Reportes Excel avanzados
+│   │   │   └── generate_excel_report.py
+│   │   ├── generate_report.py
+│   │   └── run_all.py
 │
 ├── docs/                       ← Documentación técnica
 │   ├── ARQUITECTURA.md         ← Diagrama y descripción de la arquitectura
@@ -99,7 +108,33 @@ produccion/
 - PostgreSQL 14+ corriendo localmente
 - Credenciales en el archivo `.env` (ver sección abajo)
 
-### 2. Instalar dependencias
+### 2. Entorno virtual (recomendado)
+Usar un entorno virtual evita contaminar las instalaciones globales de Python y facilita reproducir el entorno del proyecto.
+
+PowerShell (Windows):
+```powershell
+cd produccion
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+CMD (Windows):
+```cmd
+cd produccion
+python -m venv .venv
+.\.venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Si por alguna razón necesitas limpiar las dependencias instaladas globalmente del proyecto, puedes ejecutar (opcional):
+```bash
+python -m pip uninstall -r requirements.txt -y
+```
+
+### 3. Instalar dependencias
 ```bash
 cd produccion
 pip install -r requirements.txt
@@ -197,11 +232,11 @@ Cada vez que se ejecuta `run_daily_sync.py`, el paso `sync_taxonomy()` siembra e
 
 | Script | Cuándo usarlo |
 |--------|---------------|
-| `scripts/audit_final.py` | Verificar que las ventas en Postgres coinciden con BSale |
-| `scripts/fix_db.py` | Correcciones puntuales en la DB (leer el script antes de ejecutar) |
-| `scripts/map_orphans.py` | Cuando hay product_types sin mapear en la taxonomía |
-| `analytics_scripts/generate_report.py` | Generar el informe PDF mensual |
-| `analytics_scripts/run_all.py` | Ejecutar todos los análisis en secuencia |
+| `tools/audits/audit_final.py` | Verificar que las ventas en Postgres coinciden con BSale |
+| `tools/maintenance/fix_db.py` | Correcciones puntuales en la DB (leer el script antes de ejecutar) |
+| `tools/taxonomy/map_orphans.py` | Cuando hay product_types sin mapear en la taxonomía |
+| `analytics/reports/generate_report.py` | Generar el informe PDF mensual |
+| `analytics/reports/run_all.py` | Ejecutar todos los análisis en secuencia |
 
 ---
 

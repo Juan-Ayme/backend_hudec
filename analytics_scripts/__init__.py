@@ -1,1 +1,0 @@
-# Analytics scripts para KAWII

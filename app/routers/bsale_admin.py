@@ -23,11 +23,14 @@ Cada operacion devuelve un mini-informe JSON estandarizado:
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import Depends, APIRouter, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from pydantic import BaseModel, Field
 
-from app.database import fetch_all, fetch_one, fetch_scalar, get_conn
+from app.database import get_db
 from harvester import bsale_client
+
 
 router = APIRouter(prefix="/bsale", tags=["bsale-admin"])
 
@@ -36,17 +39,17 @@ router = APIRouter(prefix="/bsale", tags=["bsale-admin"])
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _now() -> str:
+async def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _report(operation: str, entity: dict | None, rows: int = 1,
+async def _report(operation: str, entity: dict | None, rows: int = 1,
             scope: str = "bsale+internal",
             warnings: list[str] | None = None) -> dict:
     return {
         "ok": True,
         "operation": operation,
-        "timestamp": _now(),
+        "timestamp": await _now(),
         "entity": entity,
         "report": {
             "rows_affected": rows,
@@ -56,9 +59,9 @@ def _report(operation: str, entity: dict | None, rows: int = 1,
     }
 
 
-def _full_pt(pt_id: int) -> dict | None:
+async def _full_pt(pt_id: int, db: AsyncSession) -> dict | None:
     """Devuelve el product_type con su mapeo a la taxonomia local."""
-    return fetch_one("""
+    res = await db.execute(text("""
         SELECT pt.bsale_product_type_id, pt.name, pt.is_active, pt.is_mapped,
                pt.subcategory_id,
                s.name AS subcategory,
@@ -68,8 +71,10 @@ def _full_pt(pt_id: int) -> dict | None:
         LEFT JOIN subcategories s ON s.id = pt.subcategory_id
         LEFT JOIN categories    c ON c.id = s.category_id
         LEFT JOIN departments   d ON d.id = c.department_id
-        WHERE pt.bsale_product_type_id = %s
-    """, (pt_id,))
+        WHERE pt.bsale_product_type_id = :pt_id
+    """), {"pt_id": pt_id})
+    row = res.mappings().first()
+    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -107,11 +112,12 @@ class ProductTypeUpdateIn(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.get("/product-types")
-def list_product_types(
+async def list_product_types(
     q: str | None = Query(None, description="Busqueda por nombre"),
     only_unmapped: bool = False,
     only_inactive: bool = False,
     limit: int = Query(500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Lista product_types locales con su mapeo a la taxonomia.
 
@@ -120,17 +126,20 @@ def list_product_types(
     la convencion 'Categoria / Subcategoria'.
     """
     where = []
-    params: list = []
+    params: dict = {}
+
     if q:
-        where.append("pt.name ILIKE %s")
-        params.append(f"%{q}%")
+        where.append("pt.name ILIKE :q")
+        params["q"] = f"%{q}%"
     if only_unmapped:
         where.append("pt.is_mapped = FALSE")
     if only_inactive:
         where.append("pt.is_active = FALSE")
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
-    rows = fetch_all(f"""
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    params["limit"] = limit
+
+    res = await db.execute(text(f"""
         SELECT pt.bsale_product_type_id, pt.name, pt.is_active, pt.is_mapped,
                pt.subcategory_id, pt.synced_at,
                s.name AS subcategory,
@@ -149,8 +158,10 @@ def list_product_types(
         LEFT JOIN departments   d ON d.id = c.department_id
         {where_sql}
         ORDER BY pt.name
-        LIMIT %s
-    """, tuple(params) + (limit,))
+        LIMIT :limit
+    """), params)
+
+    rows = [dict(r) for r in res.mappings().all()]
     return {"total": len(rows), "items": rows}
 
 
@@ -159,7 +170,10 @@ def list_product_types(
 # ---------------------------------------------------------------------------
 
 @router.post("/product-types", status_code=201)
-def create_product_type(body: ProductTypeIn) -> dict:
+async def create_product_type(
+    body: ProductTypeIn,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """
     1) Crea el product_type en BSale (POST /v1/product_types.json).
     2) Lo inserta en la tabla local product_types.
@@ -170,10 +184,12 @@ def create_product_type(body: ProductTypeIn) -> dict:
     # Validar subcategoria local si se entrega
     sub_local = None
     if body.subcategory_id is not None:
-        sub_local = fetch_one(
-            "SELECT id, name FROM subcategories WHERE id = %s",
-            (body.subcategory_id,),
+        res_sub = await db.execute(
+            text("SELECT id, name FROM subcategories WHERE id = :id"),
+            {"id": body.subcategory_id},
         )
+        row = res_sub.mappings().first()
+        sub_local = dict(row) if row else None
         if not sub_local:
             raise HTTPException(
                 404,
@@ -193,21 +209,23 @@ def create_product_type(body: ProductTypeIn) -> dict:
 
     # 2) BD local (UPSERT idempotente)
     is_mapped = sub_local is not None
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO product_types
-                (bsale_product_type_id, name, subcategory_id, is_active, is_mapped, synced_at)
-            VALUES (%s, %s, %s, TRUE, %s, NOW())
-            ON CONFLICT (bsale_product_type_id) DO UPDATE SET
-                name           = EXCLUDED.name,
-                subcategory_id = EXCLUDED.subcategory_id,
-                is_active      = EXCLUDED.is_active,
-                is_mapped      = EXCLUDED.is_mapped,
-                synced_at      = NOW()
-            """,
-            (pt_id, body.name, body.subcategory_id, is_mapped),
-        )
+    await db.execute(text("""
+        INSERT INTO product_types
+            (bsale_product_type_id, name, subcategory_id, is_active, is_mapped, synced_at)
+        VALUES (:pt_id, :name, :sub_id, TRUE, :is_mapped, NOW())
+        ON CONFLICT (bsale_product_type_id) DO UPDATE SET
+            name           = EXCLUDED.name,
+            subcategory_id = EXCLUDED.subcategory_id,
+            is_active      = EXCLUDED.is_active,
+            is_mapped      = EXCLUDED.is_mapped,
+            synced_at      = NOW()
+    """), {
+        "pt_id": pt_id,
+        "name": body.name,
+        "sub_id": body.subcategory_id,
+        "is_mapped": is_mapped,
+    })
+    await db.commit()
 
     warnings = []
     if not is_mapped:
@@ -216,7 +234,8 @@ def create_product_type(body: ProductTypeIn) -> dict:
             "PATCH /bsale/product-types/{id} con subcategory_id para mapearlo."
         )
 
-    return _report("create_product_type", _full_pt(pt_id), warnings=warnings)
+    entity = await _full_pt(pt_id, db)
+    return await _report("create_product_type", entity, warnings=warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +243,12 @@ def create_product_type(body: ProductTypeIn) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.patch("/product-types/{pt_id}")
-def update_product_type(pt_id: int, body: ProductTypeUpdateIn,
-                        unmap: bool = False) -> dict:
+async def update_product_type(
+    pt_id: int,
+    body: ProductTypeUpdateIn,
+    unmap: bool = False,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """
     Actualiza un product_type. Tres operaciones independientes:
 
@@ -235,7 +258,7 @@ def update_product_type(pt_id: int, body: ProductTypeUpdateIn,
 
     Se pueden combinar en un mismo request.
     """
-    pt = _full_pt(pt_id)
+    pt = await _full_pt(pt_id, db)
     if not pt:
         raise HTTPException(404, f"product_type {pt_id} no existe en mi BD")
 
@@ -261,40 +284,42 @@ def update_product_type(pt_id: int, body: ProductTypeUpdateIn,
         new_is_mapped = False
         scopes.add("internal")
     elif body.subcategory_id is not None and body.subcategory_id != pt["subcategory_id"]:
-        sub_local = fetch_one(
-            "SELECT id FROM subcategories WHERE id = %s",
-            (body.subcategory_id,),
+        res_sub = await db.execute(
+            text("SELECT id FROM subcategories WHERE id = :id"),
+            {"id": body.subcategory_id},
         )
-        if not sub_local:
+        if not res_sub.scalar():
             raise HTTPException(404, f"Subcategoria {body.subcategory_id} no existe")
         new_sub_id = body.subcategory_id
         new_is_mapped = True
         scopes.add("internal")
 
     if not scopes:
-        return _report(
+        return await _report(
             "update_product_type", pt, rows=0, scope="noop",
             warnings=["No se entrego ningun cambio"],
         )
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE product_types
-               SET name = %s,
-                   subcategory_id = %s,
-                   is_mapped = %s,
-                   synced_at = NOW()
-             WHERE bsale_product_type_id = %s
-            """,
-            (new_name, new_sub_id, new_is_mapped, pt_id),
-        )
+    await db.execute(text("""
+        UPDATE product_types
+           SET name           = :name,
+               subcategory_id = :sub_id,
+               is_mapped      = :is_mapped,
+               synced_at      = NOW()
+         WHERE bsale_product_type_id = :pt_id
+    """), {
+        "name": new_name,
+        "sub_id": new_sub_id,
+        "is_mapped": new_is_mapped,
+        "pt_id": pt_id,
+    })
+    await db.commit()
 
     scope = "bsale+internal" if "bsale" in scopes and "internal" in scopes \
         else ("bsale" if "bsale" in scopes else "internal_db")
 
-    return _report("update_product_type", _full_pt(pt_id),
-                    scope=scope, warnings=warnings)
+    entity = await _full_pt(pt_id, db)
+    return await _report("update_product_type", entity, scope=scope, warnings=warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +327,11 @@ def update_product_type(pt_id: int, body: ProductTypeUpdateIn,
 # ---------------------------------------------------------------------------
 
 @router.delete("/product-types/{pt_id}")
-def delete_product_type(pt_id: int, force: bool = False) -> dict:
+async def delete_product_type(
+    pt_id: int,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """
     Elimina un product_type en BSale + BD interna.
 
@@ -311,14 +340,16 @@ def delete_product_type(pt_id: int, force: bool = False) -> dict:
     product_type fantasma (BSale tipicamente no permite borrar tipos
     con productos vivos, asi que ese caso suele fallar en la API).
     """
-    pt = _full_pt(pt_id)
+    pt = await _full_pt(pt_id, db)
     if not pt:
         raise HTTPException(404, f"product_type {pt_id} no existe en mi BD")
 
-    n_prods = fetch_scalar(
-        "SELECT COUNT(*) FROM products WHERE bsale_product_type_id = %s",
-        (pt_id,),
-    ) or 0
+    res_count = await db.execute(
+        text("SELECT COUNT(*) FROM products WHERE bsale_product_type_id = :pt_id"),
+        {"pt_id": pt_id},
+    )
+    n_prods = res_count.scalar() or 0
+
     warnings: list[str] = []
     if n_prods > 0 and not force:
         raise HTTPException(
@@ -339,15 +370,17 @@ def delete_product_type(pt_id: int, force: bool = False) -> dict:
         raise HTTPException(502, f"Error eliminando en BSale: {exc}")
 
     # 2) BD local
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM product_types WHERE bsale_product_type_id = %s",
-            (pt_id,),
-        )
+    await db.execute(
+        text("DELETE FROM product_types WHERE bsale_product_type_id = :pt_id"),
+        {"pt_id": pt_id},
+    )
+    await db.commit()
 
-    return _report("delete_product_type",
-                   {"bsale_product_type_id": pt_id, "name": pt["name"]},
-                   warnings=warnings)
+    return await _report(
+        "delete_product_type",
+        {"bsale_product_type_id": pt_id, "name": pt["name"]},
+        warnings=warnings,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +388,10 @@ def delete_product_type(pt_id: int, force: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.post("/product-types/{pt_id}/resync")
-def resync_product_type(pt_id: int) -> dict:
+async def resync_product_type(
+    pt_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """
     Trae el product_type desde BSale y reescribe la fila local
     (sin tocar el subcategory_id local). Util si alguien edito en BSale
@@ -367,20 +403,18 @@ def resync_product_type(pt_id: int) -> dict:
     if not data or "id" not in data:
         raise HTTPException(404, f"BSale no devolvio product_type {pt_id}")
 
-    is_active = str(data.get("state", "0")) in ("0", 0, False, "false")
+    is_active = str(data.get("state", "0")) not in ("1", 1, True, "true")
 
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO product_types
-                (bsale_product_type_id, name, is_active, is_mapped, synced_at)
-            VALUES (%s, %s, %s, FALSE, NOW())
-            ON CONFLICT (bsale_product_type_id) DO UPDATE SET
-                name      = EXCLUDED.name,
-                is_active = EXCLUDED.is_active,
-                synced_at = NOW()
-            """,
-            (pt_id, data.get("name", ""), is_active),
-        )
+    await db.execute(text("""
+        INSERT INTO product_types
+            (bsale_product_type_id, name, is_active, is_mapped, synced_at)
+        VALUES (:pt_id, :name, :is_active, FALSE, NOW())
+        ON CONFLICT (bsale_product_type_id) DO UPDATE SET
+            name      = EXCLUDED.name,
+            is_active = EXCLUDED.is_active,
+            synced_at = NOW()
+    """), {"pt_id": pt_id, "name": data.get("name", ""), "is_active": is_active})
+    await db.commit()
 
-    return _report("resync_product_type", _full_pt(pt_id), scope="bsale->internal")
+    entity = await _full_pt(pt_id, db)
+    return await _report("resync_product_type", entity, scope="bsale->internal")

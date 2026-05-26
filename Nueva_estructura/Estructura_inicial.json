@@ -13,17 +13,12 @@
       "Galletas": [],
       "Gomitas": [],
       "Marshmallows": [],
-      "Snacks Importados": [],
-      "Snacks y Chocolates": []
-    },
-    "Fideos y Pasta": {
-      "Fideos Instantáneos Asiáticos": []
+      "Snacks y Chocolates": [],
+      "Chicles": []
     },
     "Panadería y Pastelería": {
       "Bizcochos y Panetelas": [],
-      "Panes Asiaticos": [],
-      "Panes Envasados": [],
-      "Pasteles Asiaticos": []
+      "Panes Envasados": []
     }
   },
   "Accesorios": {
@@ -54,9 +49,6 @@
     }
   },
   "Bebidas": {
-    "Infusiones": {
-      "Té e Infusiones": []
-    },
     "Jugos y Otras Bebidas": {
       "Bebidas Asiáticas": []
     }
@@ -93,12 +85,14 @@
       "Cremas Corporales": [],
       "Cremas de Manos": [],
       "Exfoliantes Corporales": [],
-      "Geles de Baño": []
+      "Geles de Baño": [],
+      "Jabones Faciales": []
     },
     "Depilación": {
       "Productos de Depilación": []
     },
     "Maquillaje y Cosméticos": {
+      "Esponja para Maquillaje": [],
       "Accesorios": [],
       "Accesorios de Maquillaje": [],
       "Base y Correctores": [],
@@ -117,7 +111,7 @@
       "Primers y Fijadores": [],
       "Sombras de Ojos": [],
       "Uñas y Esmaltes": [],
-      "Paleta de maquillaje multifuncional":[]
+      "Paleta de maquillaje multifuncional": []
     },
     "Perfumes y Fragancias": {
       "Perfumes Infantiles con Licencia": [],
@@ -152,7 +146,9 @@
     "Higiene Personal": {
       "Desodorantes": [],
       "Hisopos": [],
-      "Talcos": []
+      "Talcos": [],
+      "Jabones Liquido para Manos": [],
+      "Jabones Corporales": []
     },
     "Papel Higiénico y Servilletas": {
       "Papel Higiénico": [],
@@ -187,7 +183,7 @@
       "Relojes de Pared": [],
       "Velas Decorativas": [],
       "Portarretratos": [],
-      "Cortinas para ventanas":[]
+      "Cortinas para ventanas": []
     },
     "Empaque y Regalo": {
       "Bolsas de Regalo": [],
@@ -222,6 +218,9 @@
       "Organizadores de Escritorio y Oficina": [],
       "Papeleras": [],
       "Perchas y Colgadores": []
+    },
+    "Muebles y Accesorios": {
+      "Mesas": []
     }
   },
   "Deportes y Fitness": {
@@ -330,7 +329,8 @@
     "Accesorios de Limpieza": {
       "Baldes, Papeleras y Trapeadores": [],
       "Escobas y Recogedores": [],
-      "Esponjas, Paños y Guantes": []
+      "Esponjas, Paños y Guantes": [],
+      "Toallas y Trapos de Limpieza": []
     },
     "Detergentes y Suavizantes": {
       "Detergentes Líquidos": [],
@@ -338,7 +338,8 @@
       "Suavizantes": []
     },
     "Lavavajillas": {
-      "Lavavajillas Líquido": []
+      "Lavavajillas Líquido": [],
+      "Lavavajillas en Pasta": []
     },
     "Lejías y Desinfectantes": {
       "Agua Oxigenada": [],
@@ -355,6 +356,9 @@
       "Quitagrasas": [],
       "Quitamanchas": [],
       "Ácidos y Quitasarros": []
+    },
+    "Jabones para Ropa": {
+      "Jabones para Ropa": []
     }
   },
   "Mascotas": {
@@ -387,14 +391,16 @@
   },
   "Moda Infantil": {
     "Ropa Infantil": {
-      "Guantes y Accesorios de Abrigo": [],
-      "Guantes, Chullos y Chalinas": []
+      "Accesorios de Abrigo": [],
+      "Guantes, Chullos y Chalinas": [],
+      "Ropa de Niñas": []
     }
   },
   "Moda Mujer": {
     "Lencería y Pijamas Mujer": {
       "Medias y Panties": [],
-      "Pijamas para Mujer": []
+      "Pijamas para Mujer": [],
+      "Calentador Dama": []
     },
     "Ropa Mujer": {
       "Abrigo": [],
@@ -407,11 +413,9 @@
   },
   "Muebles": {
     "Comedor": {
-      "Mesas": [],
       "Sillas": []
     },
     "Dormitorio": {
-      "Mesas de Noche": [],
       "Roperos y Closets": []
     },
     "Infantil": {
@@ -422,8 +426,7 @@
       "Zapateras": []
     },
     "Sala": {
-      "Bancos y Puff": [],
-      "Mesas de Sala": []
+      "Bancos y Puff": []
     }
   },
   "Packs": {
@@ -483,16 +486,13 @@
   "Tendencias Kawaii": {
     "Decoración Kawaii": {
       "Alcancías Kawaii": [],
-      "Decoración Kawaii": []
+      "Accesorios de Hogar Kawaii": []
     },
     "Llaveros y Accesorios Tendencia": {
       "Llaveros Kawaii": []
     },
     "Peluches": {
       "Peluches Kawaii": []
-    },
-    "Peluches Kawaii": {
-      "Peluches Labubu": []
     },
     "Accesorios Kawaii": {
       "Bolsos y Mochilas Kawaii": []
