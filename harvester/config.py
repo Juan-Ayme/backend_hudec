@@ -81,6 +81,14 @@ TIPOS_DEVOLUCION: list[int] = [
     int(x.strip()) for x in os.environ.get("TIPOS_DEVOLUCION", "9,40,43").split(",") if x.strip()
 ]
 
+# IDs de documentos de TRASLADO INTERNO entre sucursales.
+# En COYA (sistema actual) el id es 53. Si en otro deployment es 37, ajustar en .env.
+# Se usa en los SQL de las matrices para no contar traslados como pérdidas
+# (sell-through real = ventas + consumos + traslados).
+TIPOS_TRASLADO: list[int] = [
+    int(x.strip()) for x in os.environ.get("TIPOS_TRASLADO", "53").split(",") if x.strip()
+]
+
 # Exclusiones de departamentos y categorías
 EXCLUDED_DEPARTMENTS: list[int] = [
     int(x.strip()) for x in os.environ.get("EXCLUDED_DEPARTMENTS", "11,12").split(",") if x.strip()

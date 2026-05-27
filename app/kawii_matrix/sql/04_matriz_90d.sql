@@ -105,7 +105,8 @@ consumos_lifetime AS (
     WHERE c.bsale_office_id = ANY(p.sucursales_objetivo)
     GROUP BY 1, 2
 ),
--- ★ Traslados de SALIDA LIFETIME (tipo 37 = TRASLADO INTERNO).
+-- ★ Traslados de SALIDA LIFETIME (IDs configurables vía :tipos_traslado).
+--    En COYA el tipo 53 = TRASLADO INTERNO (el tipo 37 no existe en este sistema).
 --    Cuando una sucursal envía mercadería a otra, sale del inventario pero
 --    NO se vende. Antes el SQL contaba esto como "recibido sin vender", inflando
 --    el sell-through aparente.
@@ -118,7 +119,7 @@ traslados_lifetime AS (
     CROSS JOIN params p
     WHERE d.is_active
       AND d.bsale_office_id = ANY(p.sucursales_objetivo)
-      AND d.bsale_document_type_id = 37  -- TRASLADO INTERNO
+      AND d.bsale_document_type_id = ANY(:tipos_traslado::int[])
     GROUP BY 1, 2
 ),
 -- Ventas posteriores a la última recepción, LIMITADAS a 90d
@@ -223,7 +224,7 @@ radiografia AS (
         COALESCE(v30.unds_vendidas_30d, 0)::numeric AS unds_vendidas_30d,
         -- ★ Consumos LIFETIME (mermas — para sell-through real)
         COALESCE(cl.unds_consumidas_lifetime, 0)::numeric AS unds_consumidas_lifetime,
-        -- ★ Traslados de salida LIFETIME (tipo 37 — para sell-through real)
+        -- ★ Traslados de salida LIFETIME (tipo 53 en COYA — para sell-through real)
         COALESCE(tl.unds_trasladadas_lifetime, 0)::numeric AS unds_trasladadas_lifetime
     FROM base b
     JOIN offices o   ON o.bsale_office_id = b.bsale_office_id
