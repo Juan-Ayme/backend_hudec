@@ -45,6 +45,7 @@ def _get_query_params() -> dict:
         OFFICES_TIENDA,
         TIPOS_VENTA,
         TIPOS_DEVOLUCION,
+        TIPOS_TRASLADO,
         EXCLUDED_DEPARTMENTS,
         EXCLUDED_CATEGORIES,
     )
@@ -53,6 +54,7 @@ def _get_query_params() -> dict:
         "sucursales_objetivo": OFFICES_TIENDA,
         "tipos_venta": TIPOS_VENTA,
         "tipos_devolucion": TIPOS_DEVOLUCION,
+        "tipos_traslado": TIPOS_TRASLADO,
         "excluded_departments": EXCLUDED_DEPARTMENTS,
         "excluded_categories": EXCLUDED_CATEGORIES,
         "timezone": settings.TIMEZONE,

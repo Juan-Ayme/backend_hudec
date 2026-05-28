@@ -165,6 +165,29 @@ async def sales_by_category(days: int = Query(30, ge=1, le=365), db: AsyncSessio
     return [dict(r) for r in res.mappings().all()]
 
 
+@router.get("/sales-by-subcategory")
+async def sales_by_subcategory(days: int = Query(30, ge=1, le=365), db: AsyncSession = Depends(get_db)) -> list[dict]:
+    dfrom, dto = _default_range(days)
+    query = f"""
+        SELECT vpf.department AS departamento, vpf.category AS categoria, vpf.subcategory AS subcategoria,
+               ROUND(SUM(dd.total_amount)::numeric, 2) AS ventas,
+               COUNT(DISTINCT doc.bsale_document_id)   AS tickets
+        FROM document_details dd
+        JOIN documents doc       ON doc.bsale_document_id = dd.bsale_document_id
+        JOIN variants v          ON v.bsale_variant_id    = dd.bsale_variant_id
+        JOIN v_products_full vpf ON vpf.bsale_product_id  = v.bsale_product_id
+        WHERE (doc.emission_date AT TIME ZONE '{_TZ}')::DATE >= :dfrom
+          AND (doc.emission_date AT TIME ZONE '{_TZ}')::DATE < :dto
+          AND COALESCE(doc.is_credit_note, FALSE) = FALSE
+          AND {_OFFICE_FILTER_DOC}
+          AND vpf.department IS NOT NULL
+        GROUP BY vpf.department, vpf.category, vpf.subcategory
+        ORDER BY ventas DESC
+    """
+    res = await db.execute(text(query), {"dfrom": dfrom, "dto": dto})
+    return [dict(r) for r in res.mappings().all()]
+
+
 @router.get("/top-products")
 async def top_products(
     days: int = Query(30, ge=1, le=365),
