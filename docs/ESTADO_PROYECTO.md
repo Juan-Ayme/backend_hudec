@@ -1,16 +1,28 @@
-         # KAWII - Estado del Proyecto (Actualizado Abril 2026)
+         # KAWII - Estado del Proyecto
 
-> Última actualización: **2026-04-26**
+> Última actualización: **2026-06-08**
 > BD: `database_kawii_pluss` en `localhost:5432` (postgres/postgres)
-> Estado de Limpieza: **260 categorías obsoletas eliminadas permanentemente de BSale y local**
+>
+> **Para detalles ver:** `SISTEMA.md` (visión general), `RESUMEN_EJECUTIVO_CLASIFICACION.md` (matrices), `CASOS_ANOMALOS_Y_PATRONES.md` (P1-P17), `ARQUITECTURA.md` (técnico).
 
 ---
 
-## 1. Resumen Ejecutivo del Estado Actual
+## 1. Resumen Ejecutivo del Estado Actual (junio 2026)
 
-El sistema ha evolucionado de simples scripts de extracción a un **Backend FastAPI completo** de producción. La base de datos PostgreSQL se ha robustecido para soportar la taxonomía interna de Kawii (3 niveles) y ahora permite **overrides individuales** por producto (asignar un producto específico a una subcategoría distinta a la de su familia original).
+El sistema está en producción operativa con:
+- **Backend FastAPI** completo (`localhost:8000`) con ~30 endpoints REST agrupados en analytics, productos, stock, documentos, taxonomía, audits, sync, kawii_matrix.
+- **Frontend Next.js** (`localhost:3000`) con dashboard, ventas-jerarquicas, matrices, reporte-diario, configuración.
+- **6 matrices de clasificación** (04, 04b, 05, 06, 07, 08-transferencias) con cascada de 33 cajas (post-rename 2026-06-06).
+- **0 huérfanos** (caja catch-all "CASO ATÍPICO" = 0 en las 3 matrices principales).
+- **17 patrones de casos raros documentados** (P1-P17) con SQL para detectarlos.
+- **Sistema de transferencias inter-sucursal** (módulo 08) con 32+ sugerencias diarias.
+- **Widget de anatomía del cambio** en `/reportes/diario` que descompone Δventas en tráfico × canasta × precio.
 
-Se han construido y puesto a prueba los **endpoints de analítica y auditoría**, los cuales consultan la vista maestra `v_products_full` para ofrecer reportes consistentes en tiempo real.
+### Estado de calidad de datos
+- ✅ Catálogo limpio (260 categorías obsoletas eliminadas en abril)
+- ✅ Taxonomía 3 niveles funcionando con overrides individuales por producto
+- ✅ Vista `v_products_full` resuelve toda la jerarquía en una consulta
+- ⚠️ **Costos**: 80% del catálogo con `cost_source='NONE'` (P14) — usuario cargando manualmente (Pareto: top 100 SKUs = 47.5% del impacto)
 
 ---
 
@@ -59,9 +71,32 @@ Script de emergencia (ya ejecutado y plasmado en `schema.sql`) para forzar la cr
 
 ## 5. Próximos Pasos Pendientes 🚀
 
-1. **Configuración de Tareas Programadas (Cron/Task Scheduler):**
-   Actualmente la sincronización se dispara manualmente o desde scripts locales. Falta dejar `update_all.py` programado a nivel de sistema operativo para que se ejecute de madrugada (ej. 06:00 AM).
-2. **Conexión con el Frontend:**
-   La API (en `localhost:8000`) ya responde a los KPIs (`/analytics/kpis`, `/analytics/sales-by-department`), pero falta verificar que el Dashboard (Frontend) la esté consumiendo adecuadamente.
-3. **Mantenimiento Mensual:**
-   Revisar esporádicamente los endpoints de `/audits` en la API para asegurar que los nuevos productos creados por los vendedores en BSale sean correctamente absorbidos por la jerarquía.
+### 🔴 Alta prioridad
+1. **P14 · Cargar costos manualmente** desde `costos_pendientes_priorizados.xlsx` (955 SKUs). Top 100 = 47.5% del impacto. Sin esto, el margen calculado y el stock_valorizado están sesgados.
+2. **Reiniciar uvicorn periódicamente** después de cambios al SQL (el código tiene `--reload`, pero los fixes del 2026-06-06 requirieron reinicio manual).
+3. **Diagnóstico Alimentos Importados** (depto con 28% urgentes — probablemente OC pendiente con proveedor asiático).
+
+### 🟡 Media
+4. **P8** · Caja específica para SKUs exclusivos de una sucursal.
+5. **P9** · Guard contra ventas mayoristas (1 ticket > 50% de las 90d) que inflan `proy_mes`.
+6. **Reporte Semanal** (ver `REPORTES_GERENCIA.md`).
+7. **Tareas Programadas** (Cron/Task Scheduler) para `update_all.py` de madrugada.
+
+### 🟢 Baja
+8. Widgets B (venta perdida por quiebre) y C (heat-map sucursal × depto) en `/reportes/diario`.
+9. D4-D12 — análisis exploratorios (cross-sell, devoluciones, día-de-semana, etc.).
+10. Refactor de matrices a CTEs compartidos.
+
+---
+
+## 6. Historial de cambios mayores (cronología 2026)
+
+| Fecha | Cambio |
+|---|---|
+| Abril 2026 | Limpieza de 260 categorías obsoletas en BSale. Overrides por producto. Vista `v_products_full`. |
+| Mayo 2026 | Endpoint `/matrix/{id}/excel` con layout maquetado. Refactor cascada 44 → 31 reglas. |
+| 2026-06-01 | Sistema rotulado "HUDEC" (white-label). Widget Anatomía + endpoint `/analytics/ticket-anatomy`. |
+| 2026-06-05 | Whitelist almaceneros [2,4,5,14,16] reemplaza `qty>=5`. Caja 🆕 RECIÉN REABASTECIDO. |
+| 2026-06-06 | **Bloque mayor**: P15 (caja LOTE FRENADO), P19 (rename de las 31 cajas), P16 (guard cob≤45 en VENDIENDO MÁS), P17 (cobertura con vel reciente 30d), módulo 08 (transferencias). |
+| 2026-06-08 | P7 (Tendencia "💤 Agotado" cuando stock=0). Excel `top_reponer_ya.xlsx`. Diagnóstico Alimentos Importados. Documentación actualizada (este archivo + SISTEMA.md + RESUMEN_EJECUTIVO). |
+| 2026-06-08 (PM) | **P18** — Caja nueva 🪦 LENTO CRÓNICO (caso GFQQ-240437 REL DE PARED, 26 unds en 10 meses). Renombrada "Días desde Últ. Recep" → "Llegó hace (días)". Agregada columna "Sell-through Lote %". 23 SKUs detectados como lentos crónicos. 0 huérfanos en las 3 matrices. |
