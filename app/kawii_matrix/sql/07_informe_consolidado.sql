@@ -17,15 +17,17 @@
 --               ▸▸▸▸ SKU
 -- =============================================================
 WITH params AS (
-    SELECT NOW()                              AS ahora,
-        NOW() - INTERVAL '15 days'           AS fecha_nuevo,
-        NOW() - INTERVAL '60 days'           AS fecha_muerte,
-        NOW() - INTERVAL '90 days'           AS fecha_corte,
-        :sucursales_objetivo::int[]          AS sucursales_objetivo,
-        :tipos_venta::int[]                  AS tipos_venta,
-        :tipos_devolucion::int[]             AS tipos_devolucion,
-        45::numeric                          AS cobertura_objetivo_dias,
-        7                                    AS piso_dias_lote
+    SELECT NOW()                                              AS ahora,
+        NOW() - (:ventana_new_product_dias * INTERVAL '1 day') AS fecha_nuevo,
+        NOW() - (:ventana_dead_dias        * INTERVAL '1 day') AS fecha_muerte,
+        NOW() - (:ventana_main_dias        * INTERVAL '1 day') AS fecha_corte,
+        CAST(:sucursales_objetivo AS int[])                  AS sucursales_objetivo,
+        CAST(:tipos_venta AS int[])                          AS tipos_venta,
+        CAST(:tipos_devolucion AS int[])                     AS tipos_devolucion,
+        CAST(:cobertura_objetivo_dias AS numeric)                    AS cobertura_objetivo_dias,
+        CAST(:piso_dias_lote AS int)                                 AS piso_dias_lote,
+        CAST(:ventana_new_product_dias AS int)                       AS ventana_new_product_dias,
+        CAST(:ventana_dead_dias AS int)                              AS ventana_dead_dias
 ),
 -- ============================================================
 -- 1. VENTAS LIFETIME (toda la historia) + ventanas cortas
@@ -134,8 +136,8 @@ sku_full AS (
     LEFT JOIN ventas_post_recep vpr ON vpr.bsale_variant_id = j.bsale_variant_id
                                     AND vpr.bsale_office_id = COALESCE(vl.bsale_office_id, st.bsale_office_id, rs.bsale_office_id)
     LEFT JOIN offices o ON o.bsale_office_id = COALESCE(vl.bsale_office_id, st.bsale_office_id, rs.bsale_office_id)
-     WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(:excluded_departments::int[])))
-       AND (j.category_id IS NULL OR NOT (j.category_id = ANY(:excluded_categories::int[])))
+     WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(CAST(:excluded_departments AS int[]))))
+       AND (j.category_id IS NULL OR NOT (j.category_id = ANY(CAST(:excluded_categories AS int[]))))
       AND COALESCE(vl.bsale_office_id, st.bsale_office_id, rs.bsale_office_id) IS NOT NULL
 ),
 sku_calc AS (
@@ -203,15 +205,13 @@ sku_metricas AS (
         END AS dias_cob,
         -- Sugerencia de compra (basada en velocidad del LOTE ACTUAL).
         -- NO sugerir comprar si:
-        --   - El producto no vende hace ≥60 días (es_muerto: alineado con flag MUERTO)
-        --   - El lote actual lleva >45 días sin rotar Y proy baja
-        -- ANTES: el threshold era >90 días, dejando 346 productos MUERTOS (DSV 60-90)
-        -- con sugerencia de compra >0 — inconsistente con su diagnóstico de muerto.
+        --   - El producto no vende hace ≥ventana_dead_dias (es_muerto: alineado con flag MUERTO)
+        --   - El lote actual lleva > cobertura_objetivo_dias sin rotar Y proy baja
         CASE
-            WHEN k.ultima_venta IS NULL OR (CURRENT_DATE - k.ultima_venta) >= 60 THEN 0
+            WHEN k.ultima_venta IS NULL OR (CURRENT_DATE - k.ultima_venta) >= (SELECT ventana_dead_dias FROM params) THEN 0
             WHEN k.stock > 0
                  AND k.ultima_recepcion IS NOT NULL
-                 AND DATE_PART('day', NOW() - k.ultima_recepcion) > 45
+                 AND DATE_PART('day', NOW() - k.ultima_recepcion) > k.cobertura_objetivo_dias
                  AND (k.unds_post_recep / k.dias_lote_actual) * 30 < 10 THEN 0
             ELSE GREATEST(0,
                 CEIL(((k.unds_post_recep / k.dias_lote_actual) * k.cobertura_objetivo_dias) - k.stock - k.reservado)
@@ -219,14 +219,14 @@ sku_metricas AS (
         END AS unds_sugeridas_compra,
         -- Velocidad histórica mensual para detectar escondidos
         CASE WHEN k.meses_con_venta > 0 THEN k.unds_lifetime / k.meses_con_venta ELSE 0 END AS vel_mensual_historica,
-        -- ¿Es escondido? (stock 1-2, sin venta >15d, pero vendía bien)
+        -- ¿Es escondido? (stock 1-2, sin venta > ventana_new_product_dias, pero vendía bien)
         (k.stock BETWEEN 1 AND 2
             AND k.ultima_venta IS NOT NULL
-            AND (CURRENT_DATE - k.ultima_venta) > 15
+            AND (CURRENT_DATE - k.ultima_venta) > (SELECT ventana_new_product_dias FROM params)
             AND k.meses_con_venta > 0
             AND k.unds_lifetime / k.meses_con_venta >= 10) AS es_escondido,
-        -- ¿Es muerto? (sin venta hace 60+ días)
-        (k.ultima_venta IS NULL OR (CURRENT_DATE - k.ultima_venta) >= 60) AS es_muerto
+        -- ¿Es muerto? (sin venta hace ventana_dead_dias días)
+        (k.ultima_venta IS NULL OR (CURRENT_DATE - k.ultima_venta) >= (SELECT ventana_dead_dias FROM params)) AS es_muerto
     FROM sku_calc k
 ),
 -- ============================================================
@@ -242,7 +242,7 @@ subcat_total AS (
            COUNT(*) FILTER (WHERE es_escondido)                 AS skus_escondidos,
            COUNT(*) FILTER (WHERE stock > 0
                               AND ultima_recepcion IS NOT NULL
-                              AND DATE_PART('day', NOW() - ultima_recepcion) > 45) AS skus_sin_rotar,
+                              AND DATE_PART('day', NOW() - ultima_recepcion) > (SELECT cobertura_objetivo_dias FROM params)) AS skus_sin_rotar,
            SUM(unds_lifetime)         AS unds_subcat,
            SUM(stock)                 AS stock_subcat,
            SUM(unds_sugeridas_compra) AS unds_compra_sugerida
@@ -506,7 +506,7 @@ SELECT
     -- ═══════════════════════════════════════════════════════════════════════════
     CASE
         -- 1. NUEVO: edad ≤15d AND volumen lifetime bajo (todavía evaluando)
-        WHEN primera_recepcion >= NOW() - INTERVAL '15 days' AND unds_lifetime < 15
+        WHEN primera_recepcion >= NOW() - ((SELECT ventana_new_product_dias FROM params) * INTERVAL '1 day') AND unds_lifetime < 15
              THEN 'P3 🌱 NUEVO: esperar ≥15d para evaluar rotación'
 
         -- 2. ESCONDIDOS (stock 1-2 + sin venta pero vendía bien históricamente)
@@ -666,7 +666,7 @@ SELECT
     -- ═══════════════════════════════════════════════════════════════════════════
     CASE
         -- 1. NUEVO
-        WHEN primera_recepcion >= NOW() - INTERVAL '15 days' AND unds_lifetime < 15
+        WHEN primera_recepcion >= NOW() - ((SELECT ventana_new_product_dias FROM params) * INTERVAL '1 day') AND unds_lifetime < 15
              THEN '🌱 NUEVO: esperando ≥15d para evaluar rotación'
 
         -- 2. ESCONDIDO

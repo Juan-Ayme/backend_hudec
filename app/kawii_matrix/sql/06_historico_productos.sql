@@ -12,10 +12,11 @@
 -- =============================================================
 WITH params AS (
     SELECT
-        NOW()                                AS ahora,
-        :sucursales_objetivo::int[]          AS sucursales_objetivo,
-        :tipos_venta::int[]                  AS tipos_venta,
-        :tipos_devolucion::int[]             AS tipos_devolucion
+        NOW()                                        AS ahora,
+        CAST(:sucursales_objetivo AS int[])          AS sucursales_objetivo,
+        CAST(:tipos_venta AS int[])                  AS tipos_venta,
+        CAST(:tipos_devolucion AS int[])             AS tipos_devolucion,
+        CAST(:ventana_main_dias AS int)                      AS ventana_main_dias
 ),
 -- Cada documento-detalle de venta o devolución, en una sola pasada
 movimientos AS (
@@ -67,7 +68,7 @@ mismo_periodo_anio_anterior AS (
     SELECT
         bsale_office_id,
         bsale_variant_id,
-        SUM(qty_venta - qty_devol) FILTER (WHERE ts BETWEEN NOW() - INTERVAL '1 year' - INTERVAL '90 days' AND NOW() - INTERVAL '1 year') AS uds_mismo_periodo_anio_pasado
+        SUM(qty_venta - qty_devol) FILTER (WHERE ts BETWEEN NOW() - INTERVAL '1 year' - ((SELECT ventana_main_dias FROM params) * INTERVAL '1 day') AND NOW() - INTERVAL '1 year') AS uds_mismo_periodo_anio_pasado
     FROM movimientos
     GROUP BY 1, 2
 ),
@@ -143,8 +144,8 @@ consolidado AS (
     LEFT JOIN stock_actual sa ON sa.bsale_office_id = b.bsale_office_id AND sa.bsale_variant_id = b.bsale_variant_id
     LEFT JOIN top_mes tm   ON tm.bsale_office_id  = b.bsale_office_id AND tm.bsale_variant_id  = b.bsale_variant_id
     LEFT JOIN mismo_periodo_anio_anterior mp ON mp.bsale_office_id = b.bsale_office_id AND mp.bsale_variant_id = b.bsale_variant_id
-    WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(:excluded_departments::int[])))
-      AND (j.category_id IS NULL OR NOT (j.category_id = ANY(:excluded_categories::int[])))
+    WHERE (j.department_id IS NULL OR NOT (j.department_id = ANY(CAST(:excluded_departments AS int[]))))
+      AND (j.category_id IS NULL OR NOT (j.category_id = ANY(CAST(:excluded_categories AS int[]))))
 ),
 calculos AS (
     SELECT
