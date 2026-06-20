@@ -20,7 +20,10 @@ from harvester.config import DB_CONFIG
 
 logger = logging.getLogger("harvester.db")
 
-# Pool de conexiones (min=1, max=4)
+# Pool de conexiones (min=2, max=12)
+# Subido de max=4 a max=12 para soportar la paralelización inter-fase
+# (orquestador en update_all.py corre 5 bloques de sync en paralelo, cada uno
+# con su propio worker pool de hasta 8 → contención en la pool vieja).
 _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 
 
@@ -29,9 +32,9 @@ def init_pool():
     global _pool
     if _pool is None:
         _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1, maxconn=4, **DB_CONFIG
+            minconn=2, maxconn=12, **DB_CONFIG
         )
-        logger.info("Pool de conexiones inicializado (%s:%s/%s)",
+        logger.info("Pool de conexiones inicializado (%s:%s/%s) [min=2, max=12]",
                      DB_CONFIG["host"], DB_CONFIG["port"], DB_CONFIG["dbname"])
 
 

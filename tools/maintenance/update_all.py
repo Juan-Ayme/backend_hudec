@@ -46,6 +46,7 @@ from harvester import db
 from harvester.sync_masters import (
     sync_taxonomy,
     sync_offices,
+    sync_users,
     sync_product_types,
     sync_document_types,
     sync_variants,
@@ -105,7 +106,7 @@ def build_report(phase_results: dict, elapsed_sec: float) -> dict:
     counts = {}
     tablas = [
         "departments", "categories", "subcategories",
-        "offices", "product_types", "document_types",
+        "offices", "users", "product_types", "document_types",
         "products", "variants", "variant_costs",
         "stock_levels", "stock_history",
         "receptions", "reception_details",
@@ -362,6 +363,7 @@ def main() -> int:
         for nombre, func in [
             ("1.Taxonomia",         sync_taxonomy),
             ("2.Sucursales",        sync_offices),
+            ("2.5.Usuarios",        sync_users),
             ("3.Categorias(BSale)", sync_product_types),
             ("4.Tipos Documento",   sync_document_types),
             ("5.Productos+Variant", sync_variants),

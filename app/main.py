@@ -28,9 +28,9 @@ from app.routers import (
     analytics,
     audits,
     bsale_admin,
-    documents,
+    config_admin,
+    matrix_simulator,
     products,
-    stock,
     sync,
     taxonomy,
     taxonomy_admin,
@@ -47,8 +47,44 @@ logger = logging.getLogger("kawii.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: logging. Shutdown: cierra."""
+    """Startup: crea/siembra la tabla de configuración runtime. Shutdown: cierra."""
     logger.info("Iniciando KAWII API...")
+    # Tabla key/value para configuración mutable en runtime: exclusiones de
+    # departamentos/categorías editables desde la UI (pantalla Configuración).
+    # La DB es la fuente de verdad; se guardan por NOMBRE (JSON) para sobrevivir a
+    # los re-seeds de la taxonomía (los IDs se reasignan). Se siembra VACÍO; el
+    # usuario define las exclusiones desde la UI.
+    try:
+        import json as _json
+        from harvester.config import (
+            EXCLUDED_DEPARTMENT_NAMES,
+            EXCLUDED_CATEGORY_NAMES,
+            SEASONAL_DEPARTMENT_NAMES,
+        )
+        # Siembra inicial desde .env (POR NOMBRE). Solo aplica al PRIMER arranque de
+        # cada empresa (ON CONFLICT DO NOTHING): replicar una empresa = poner sus
+        # nombres en el .env y arrancar. Luego la UI (Configuración) puede ajustar.
+        seed = {
+            "excluded_departments": _json.dumps(EXCLUDED_DEPARTMENT_NAMES, ensure_ascii=False),
+            "excluded_categories": _json.dumps(EXCLUDED_CATEGORY_NAMES, ensure_ascii=False),
+            "seasonal_departments": _json.dumps(SEASONAL_DEPARTMENT_NAMES, ensure_ascii=False),
+        }
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS app_config ("
+                " key TEXT PRIMARY KEY,"
+                " value TEXT NOT NULL DEFAULT '',"
+                " updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            ))
+            for key, val in seed.items():
+                await conn.execute(
+                    text("INSERT INTO app_config (key, value) VALUES (:k, :v)"
+                         " ON CONFLICT (key) DO NOTHING"),
+                    {"k": key, "v": val},
+                )
+        logger.info("app_config lista (exclusiones por nombre; sembradas de .env si vacío).")
+    except Exception as exc:
+        logger.exception("No se pudo inicializar app_config: %s", exc)
     yield
     logger.info("Apagando KAWII API...")
     await engine.dispose()
@@ -61,8 +97,8 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=(
         "API REST sobre la base de datos KAWII (PostgreSQL + ETL BSale). "
-        "Expone taxonomia, productos, stock, documentos, analytics y "
-        "permite disparar sincronizaciones."
+        "Expone taxonomia, productos, analytics y matriz de clasificación, "
+        "y permite disparar sincronizaciones."
     ),
     lifespan=lifespan,
 )
@@ -81,12 +117,12 @@ app.include_router(taxonomy.router)
 app.include_router(taxonomy_admin.router)   # CRUD interno (departments/categories/subcategories)
 app.include_router(bsale_admin.router)      # CRUD que escribe a BSale (product_types)
 app.include_router(products.router)
-app.include_router(stock.router)
-app.include_router(documents.router)
 app.include_router(analytics.router)
 app.include_router(sync.router)
 app.include_router(audits.router)
+app.include_router(config_admin.router)     # /config/* — configuración runtime (exclusiones)
 app.include_router(matrix_router)  # /matrix/* — matrices de clasificación inteligente
+app.include_router(matrix_simulator.router)  # /matrix-sim/* — debugger por SKU del simulador de cascada
 
 
 # ---- Root / health ----

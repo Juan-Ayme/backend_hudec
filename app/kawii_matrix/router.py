@@ -1,129 +1,39 @@
 """
 Endpoints REST para el sistema KAWII Matrix.
 
-Expone las 4 matrices analíticas como JSON, con filtros, paginación,
-agregaciones (distribución, grupos de acción) y vistas especializadas
-(transferencias, resumen ejecutivo).
+Tras el cleanup en cascada solo sobrevive el módulo **04b** (matriz 90d
+jerárquica con totales en S/), que alimenta a `/reportes/tablero` (action-groups)
+y `/reportes/diario` (action-groups + excel).
 """
 
+import io
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, HTTPException, Path
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from analytics.excel_executive import build_executive_workbook
+from app.config import get_settings
 from app.database import get_db
 from app.kawii_matrix import service
-from app.kawii_matrix.schemas import (
-    MatrixResponse,
-    DistributionResponse,
-    TransferResponse,
-    ActionGroupsResponse,
-    SummaryResponse,
-)
+from app.kawii_matrix.schemas import ActionGroupsResponse
+
+# Metadatos que aparecen en la Portada del Excel.
+_MODULE_META: dict[str, dict[str, str]] = {
+    "04b": {
+        "titulo": "Matriz 90d Jerárquica",
+        "sql_file": "04b_matriz_90d_jerarquico.sql",
+        "descripcion": (
+            "Variante del módulo 04 con totales agregados por Subcategoría, "
+            "Categoría y Departamento (en unidades y S/), más el % de "
+            "participación del SKU en cada nivel."
+        ),
+    },
+}
 
 
 router = APIRouter(prefix="/matrix", tags=["matrix"])
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Endpoint principal: ejecutar una matriz por su ID con filtros
-# ─────────────────────────────────────────────────────────────────────────
-
-@router.get(
-    "/{module_id}",
-    response_model=MatrixResponse,
-    summary="Ejecuta una matriz KAWII y devuelve los SKUs clasificados",
-)
-async def get_matrix(
-    module_id: str = Path(..., pattern="^(04|04b|05|06|07)$", description="ID del módulo"),
-    sucursal: str | None = Query(None, description="Filtro: Magdalena, Asamblea"),
-    departamento: str | None = Query(None, description="Filtro por nombre de departamento"),
-    categoria: str | None = Query(None, description="Filtro por categoría"),
-    subcategoria: str | None = Query(None, description="Filtro por subcategoría"),
-    sku: str | None = Query(None, description="Filtro exacto por código SKU"),
-    clasificacion_contains: str | None = Query(
-        None,
-        description="Filtra por texto contenido en la clasificación (ej: 'ALTA ROTACIÓN', 'EXITOSO')",
-    ),
-    nivel: str | None = Query(
-        None,
-        description="Solo módulo 07: filtrar por nivel jerárquico (DEPARTAMENTO/CATEGORÍA/SUBCATEGORÍA/SKU)",
-    ),
-    limit: int | None = Query(None, ge=1, le=10000, description="Máximo de filas a retornar"),
-    offset: int = Query(0, ge=0, description="Offset para paginación"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Módulos disponibles:
-      - **04**: Matriz 90d (foto operativa — 90 días, vista por sucursal)
-      - **04b**: Matriz 90d Jerárquica (+ totales en S/ por Subcat/Cat/Depto)
-      - **05**: Matriz Operativa (90d + contexto lifetime + IC)
-      - **06**: Histórico Productos (lifetime, autopsia de ciclo de vida)
-      - **07**: Informe Consolidado (jerárquico DEPT→CAT→SUBCAT→SKU con ABC Pareto)
-    """
-    try:
-        return await service.run_matrix(
-            db,
-            module_id,
-            sucursal=sucursal,
-            departamento=departamento,
-            categoria=categoria,
-            subcategoria=subcategoria,
-            sku=sku,
-            clasificacion_contains=clasificacion_contains,
-            nivel=nivel,
-            limit=limit,
-            offset=offset,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Distribución por categoría
-# ─────────────────────────────────────────────────────────────────────────
-
-@router.get(
-    "/{module_id}/distribution",
-    response_model=DistributionResponse,
-    summary="Distribución de SKUs por etiqueta de clasificación",
-)
-async def get_distribution(
-    module_id: str = Path(..., pattern="^(04|04b|05|06|07)$"),
-    sucursal: str | None = Query(None, description="Filtro opcional por sucursal"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Devuelve cuántos productos están en cada categoría.
-    Útil para gráficos de pie/donut en el dashboard.
-    """
-    try:
-        return await service.get_distribution(db, module_id, sucursal=sucursal)
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Transferencias inter-sucursal
-# ─────────────────────────────────────────────────────────────────────────
-
-@router.get(
-    "/{module_id}/transfers",
-    response_model=TransferResponse,
-    summary="Sugerencias de transferencia inter-sucursal (solo módulos 04 y 05)",
-)
-async def get_transfers(
-    module_id: str = Path(..., pattern="^(04|04b|05)$"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Detecta productos con EXCESO en una sucursal mientras la otra tiene DÉFICIT.
-    Sugiere cantidad a transferir manteniendo 1 mes de stock al donante.
-    """
-    try:
-        return await service.get_transfers(db, module_id)
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -136,7 +46,7 @@ async def get_transfers(
     summary="Agrupa SKUs por acción de negocio (urgente/reponer/descatalogar/...)",
 )
 async def get_action_groups(
-    module_id: str = Path(..., pattern="^(04|04b|05|06|07)$"),
+    module_id: str = Path(..., pattern="^04b$"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -156,69 +66,126 @@ async def get_action_groups(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Resumen ejecutivo
+# Descarga del reporte como Excel (.xlsx) bien maquetado
 # ─────────────────────────────────────────────────────────────────────────
 
 @router.get(
-    "/_/summary",
-    response_model=SummaryResponse,
-    summary="Resumen ejecutivo de los 2 sucursales (vista operativa 90d)",
+    "/{module_id}/excel",
+    summary="Descarga el reporte de la matriz como Excel (.xlsx) bien maquetado",
+    response_class=StreamingResponse,
 )
-async def get_summary(db: AsyncSession = Depends(get_db)):
+async def get_matrix_excel(
+    module_id: str = Path(..., pattern="^04b$"),
+    sucursal: str | None = Query(None, description="Filtro opcional por sucursal"),
+    accion: str | None = Query(
+        None,
+        description=(
+            "Filtro opcional por ACCIÓN de negocio (buckets separados por coma): "
+            "urgente_comprar, reponer, saludable, exceso, liquidar, descatalogar, "
+            "evaluar. Ej: 'urgente_comprar,reponer' para el reporte de Compra urgente."
+        ),
+    ),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Devuelve KPIs operativos:
-      - Total SKUs activos por sucursal
-      - Cuántos urgentes, reponer, saludables, descatalogar, exceso
-      - Cantidad de transferencias inter-sucursal sugeridas
-      - Productos creciendo vs decayendo en últimos 45d
+    Genera un Excel con layout ejecutivo (jerarquía DEPT→CAT→SUBCAT→SKU,
+    cabecera naranja, sumas por nivel).
+
+    Lo usa `/reportes/diario` para los botones "Compra urgente" y "Alertas de
+    quiebre" — filtra por `accion` con los mismos buckets que `/action-groups`.
     """
-    return await service.get_summary(db)
+    settings = get_settings()
+    meta = _MODULE_META[module_id]
 
+    try:
+        started = datetime.now()
+        result = await service.run_matrix(
+            db,
+            module_id,
+            sucursal=sucursal,
+            limit=None,  # exportamos TODO lo que matchea los filtros
+            offset=0,
+        )
+        elapsed = (datetime.now() - started).total_seconds()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
-# ─────────────────────────────────────────────────────────────────────────
-# Lista de módulos disponibles
-# ─────────────────────────────────────────────────────────────────────────
+    titulo = meta["titulo"]
 
-@router.get("/", summary="Lista los módulos disponibles")
-async def list_modules():
-    """Devuelve los IDs y descripciones de cada matriz."""
-    return {
-        "modules": [
-            {
-                "id": "04",
-                "name": "Matriz 90d",
-                "description": "Foto operativa del 'ahora' (ventana 90 días, por sucursal)",
-                "endpoint": "/matrix/04",
-            },
-            {
-                "id": "04b",
-                "name": "Matriz 90d Jerárquica",
-                "description": "Matriz 90d + totales en S/ por Subcategoría, Categoría y Departamento",
-                "endpoint": "/matrix/04b",
-            },
-            {
-                "id": "05",
-                "name": "Matriz Operativa Enriquecida",
-                "description": "Matriz 90d + contexto lifetime (Mejor Mes, IC, Sell-Through Lifetime)",
-                "endpoint": "/matrix/05",
-            },
-            {
-                "id": "06",
-                "name": "Histórico Productos",
-                "description": "Autopsia lifetime: ciclo de vida completo del SKU",
-                "endpoint": "/matrix/06",
-            },
-            {
-                "id": "07",
-                "name": "Informe Consolidado",
-                "description": "Vista jerárquica DEPT→CAT→SUBCAT→SKU con ABC Pareto",
-                "endpoint": "/matrix/07",
-            },
-        ],
-        "endpoints_especiales": {
-            "summary": "/matrix/_/summary",
-            "distribution": "/matrix/{module_id}/distribution",
-            "transfers": "/matrix/{module_id}/transfers",
-            "action_groups": "/matrix/{module_id}/action-groups",
-        },
+    # Filtro opcional por ACCIÓN de negocio (mismos buckets que /action-groups).
+    accion_label_map = {
+        "urgente_comprar": "Compra urgente",
+        "reponer": "Reponer",
+        "saludable": "Saludable",
+        "exceso": "Exceso",
+        "liquidar": "Liquidar",
+        "descatalogar": "Descatalogar",
+        "evaluar": "Evaluar",
+        "otro": "Otro",
     }
+    accion_label = None
+    if accion:
+        wanted = {a.strip() for a in accion.split(",") if a.strip()}
+        invalid = wanted - set(service.ACTION_BUCKETS)
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Acción(es) inválida(s): {', '.join(sorted(invalid))}. "
+                       f"Válidas: {', '.join(service.ACTION_BUCKETS)}",
+            )
+        label_col = service.find_label_column(result["columns"])
+        if not label_col:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El módulo {module_id} no tiene columna de clasificación; "
+                       "no se puede filtrar por acción.",
+            )
+        result["rows"] = [
+            r for r in result["rows"]
+            if (not r.get("Nivel") or r["Nivel"] == "SKU")
+            and service.classify_action(str(r.get(label_col) or "")) in wanted
+        ]
+        accion_label = " + ".join(
+            accion_label_map[a] for a in service.ACTION_BUCKETS if a in wanted
+        )
+        titulo = f"{titulo} — {accion_label}"
+
+    cols: list[str] = result["columns"]
+    # Builders esperan rows como tuplas/listas (compat con cursor.fetchall);
+    # convertimos cada dict a tupla en el orden de las columnas.
+    rows_tuples = [tuple(row.get(c) for c in cols) for row in result["rows"]]
+
+    wb = build_executive_workbook(
+        cols=cols,
+        rows=rows_tuples,
+        modulo_id=module_id,
+        titulo=titulo,
+        sql_file=meta["sql_file"],
+        descripcion=meta["descripcion"],
+        classification_col=settings.CLASSIFICATION_LABEL,
+        elapsed_seconds=elapsed,
+        brand_name=settings.BRAND_NAME,
+        sucursal=sucursal,
+        accion_label=accion_label,
+        periodo_dias=90,
+    )
+
+    # Serializar a bytes en memoria (no toca el filesystem)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    fecha = datetime.now().strftime("%Y-%m-%d")
+    safe_title = titulo.replace("—", "-").replace("/", "_").replace(":", "").replace(" ", "_")
+    filename = f"{module_id}_{safe_title}_{fecha}.xlsx"
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Total-Rows": str(len(rows_tuples)),
+        },
+    )

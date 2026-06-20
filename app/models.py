@@ -15,6 +15,22 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    bsale_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    bsale_office_id: Mapped[Optional[int]] = mapped_column(ForeignKey("offices.bsale_office_id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default="true", default=True, nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    office: Mapped[Optional["Office"]] = relationship("Office", back_populates="users")
+    documents: Mapped[List["Document"]] = relationship("Document", back_populates="user")
+    receptions: Mapped[List["Reception"]] = relationship("Reception", back_populates="user")
+
+
 class Department(Base):
     __tablename__ = "departments"
     
@@ -166,6 +182,7 @@ class Office(Base):
     consumptions: Mapped[List["Consumption"]] = relationship("Consumption", back_populates="office")
     stock_levels: Mapped[List["StockLevel"]] = relationship("StockLevel", back_populates="office")
     stock_history: Mapped[List["StockHistory"]] = relationship("StockHistory", back_populates="office")
+    users: Mapped[List["User"]] = relationship("User", back_populates="office")
 
 
 class DocumentType(Base):
@@ -199,12 +216,13 @@ class Document(Base):
     exempt_amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default="0", default=Decimal('0.0'), nullable=False)
     is_credit_note: Mapped[bool] = mapped_column(Boolean, server_default="false", default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default="true", default=True, nullable=False)
-    bsale_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bsale_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.bsale_user_id"), nullable=True)
     token: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     document_type: Mapped["DocumentType"] = relationship("DocumentType", back_populates="documents")
     office: Mapped[Optional["Office"]] = relationship("Office", back_populates="documents")
+    user: Mapped[Optional["User"]] = relationship("User", back_populates="documents")
     details: Mapped[List["DocumentDetail"]] = relationship("DocumentDetail", back_populates="document", cascade="all, delete-orphan")
 
 
@@ -242,10 +260,11 @@ class Reception(Base):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_internal_dispatch: Mapped[bool] = mapped_column(Boolean, server_default="false", default=False, nullable=False)
     is_transfer: Mapped[bool] = mapped_column(Boolean, server_default="false", default=False, nullable=False)
-    bsale_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bsale_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.bsale_user_id"), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     office: Mapped["Office"] = relationship("Office", back_populates="receptions")
+    user: Mapped[Optional["User"]] = relationship("User", back_populates="receptions")
     details: Mapped[List["ReceptionDetail"]] = relationship("ReceptionDetail", back_populates="reception", cascade="all, delete-orphan")
 
 
