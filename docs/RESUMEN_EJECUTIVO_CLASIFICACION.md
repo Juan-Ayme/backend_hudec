@@ -22,18 +22,20 @@ A. CASOS ESPECIALES (5 cajas)
    → PRODUCTO NUEVO, TEMPORADA CERRADA OK, SALDO DE TEMPORADA, PÉRDIDA DE STOCK, VENDIÓ Y SE PERDIÓ
 
 B. STOCK=0 + VENDIÓ BIEN (5 cajas)
-   → BESTSELLER ACTIVO, BESTSELLER EN PAUSA, OPORTUNIDAD PERDIDA, LENTO PERO CONSTANTE, DEMANDA EXTINTA
+   → BESTSELLER ACTIVO, BESTSELLER AGOTADO 1-2 MESES ★ (P21, antes EN PAUSA), OPORTUNIDAD PERDIDA, LENTO PERO CONSTANTE, DEMANDA EXTINTA
 
-C. STOCK=0 + VENDIÓ POCO (7 cajas)
+C. STOCK=0 + VENDIÓ POCO (8 cajas)
    → QUIEBRE DE BESTSELLER, AGOTADO CON DEMANDA, EX-BESTSELLER ENFRIADO, PRODUCTO EMERGENTE,
-     PRODUCTO MUERTO, BAJO VOLUMEN AGOTADO, AGOTADO NO PRIORITARIO
+     PRODUCTO MUERTO, RECIBIDO Y NO VENDIDO, BAJO VOLUMEN AGOTADO, AGOTADO NO PRIORITARIO
 
 D. STOCK>0 + SIN VENTAS (2 cajas)
    → STOCK RECIÉN LLEGADO, STOCK PARADO 90 DÍAS
 
-E. STOCK>0 + CON VENTAS (14 cajas)
+E. STOCK>0 + CON VENTAS (16 cajas)
    → STOCK BAJO QUIETO, LOTE NUEVO VENDIENDO BIEN, RECIÉN REABASTECIDO, RITMO PERDIDO,
-     LOTE FRENADO ★ (era SALDO QUEMADO), ROTACIÓN BAJANDO, ALTA ROTACIÓN, ROTACIÓN ACTIVA,
+     LOTE FRENADO ★ (era SALDO QUEMADO), ROTACIÓN BAJANDO, ALTA ROTACIÓN,
+     ⚡ ROTACIÓN ACTIVA AL BORDE ★★ (P23, 2026-06-12 — lote llegó hace ≤30d, vol 10-29/mes, cob ≤15d → REPONER YA),
+     ROTACIÓN ACTIVA,
      INVENTARIO SANO, EXCESO+DEMANDA CAYENDO, STOCK EXCESIVO,
      🪦 LENTO CRÓNICO ★★ (P18, 2026-06-08 — captura GFQQ-240437),
      POCO STOCK CON DEMANDA, VENDIENDO MÁS QUE ANTES, BAJA ROTACIÓN
@@ -88,6 +90,7 @@ F. CATCH-ALL (1) → CASO ATÍPICO — REVISAR MANUAL (debería ser 0 siempre)
 | 22 | **P17 — Cobertura ahora usa velocidad RECIENTE (30d) en lugar de la lifetime del lote**: agregada columna `dias_cobertura_reciente` en `metricas_reciente`, calculada con `unds_vendidas_30d / dias_con_stock_30d`. Fallback a `dias_cobertura` lifetime si no hay datos recientes. Reemplazado en la cascada de clasificación de los 3 SQL (12 ocurrencias por archivo, vía `_beta/fix_p17_cobertura_reciente.py`). Hace que SKUs acelerando se detecten antes como urgentes (cobertura cae) y SKUs desacelerando muestren la realidad operativa. 0 huérfanos · TRAPEADOR y ESMALTE-J01 sin regresión. | ✅ |
 | 23 | **P7 RESUELTO — Tendencia "💤 Agotado" cuando stock=0**: la columna `Tendencia` en los 3 SQL ahora chequea `stock_disponible = 0` ANTES de la fórmula v_recent vs v_old. Evita que SKUs agotados aparezcan como "📉 Decayendo" (la "caída" era por falta de stock, no por bajada de demanda). Detectado al analizar el Excel del usuario donde 27 SKUs en `🔥 BESTSELLER ACTIVO — REPONER YA` mostraban tendencia decayendo. Caso testigo: MS-3346 Tomatodo Play Hard. 995 SKUs con stock=0 ahora se ven coherentes. | ✅ |
 | 24 | **P18 — Caja nueva 🪦 LENTO CRÓNICO + columnas "Llegó hace" + "Sell-through Lote %"**. Captura SKUs con edad lifetime alta pero vel lifetime baja (caso GFQQ-240437 REL DE PARED MAG: 26 unds en 10 meses, vel reciente fingía "demanda activa" por 1 venta de mayo). Condiciones: `stock>0 AND edad_dias≥180 AND dias_desde_ultima_recep≥30 AND unds_vendidas_lifetime<60 AND vel_lifetime<5/mes`. 23 SKUs detectados. Renombrada "Días desde Últ. Recep" → "Llegó hace (días)" y agregada "Sell-through Lote %" (`unds_lote_total / (unds_lote_total + stock_disponible) × 100`). Aplicado vía `_beta/fix_p18_lento_cronico.py`. | ✅ |
+| 26 | **P21 — Guard dsv≥8 en LENTO CRÓNICO + rename "BESTSELLER EN PAUSA" → "⏸️ BESTSELLER AGOTADO 1-2 MESES — REPONER"**. (a) Consumibles lentos pero de reposición continua que vendieron esta semana (caso Drive Ultra: 2.7/mes, lotes chicos de 8, vendió ayer, queda 1) ya no caen en "NO REPONER" — pasan a las reglas de stock crítico. (b) Para agotados con sell-through ≥80%, el dsv mide "días sin reponer", NO enfriamiento de demanda (caso GALLETAS: vendía 37/mes, agotado 34d). Los estacionales ya se filtran antes (TEMPORADA CERRADA) → acción REPONER. classify_action: bucket evaluar→reponer. Auditoría re-verificada: 3,491/3,491. | ✅ |
 | 25 | **P19 — Columna informativa "Vida lote (días)"** = `dias_desde_ultima_recep + dias_cobertura_reciente`. NO clasifica diferente, solo informa. Surge de la preocupación del usuario "¿88 días no es mucho?". Análisis: 78% del catálogo tiene vida >90d (modelo nicho), aplicar regla "vida ≤45d = sano" marcaría 92% como no-sano (inútil). Solución: dar la métrica visible para que el usuario tome decisión operativa de pedir lotes más chicos para SKUs con vida >60d. | ✅ |
 
 ---

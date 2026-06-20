@@ -242,6 +242,69 @@ def sync_offices() -> dict:
 
 
 # ============================================================
+# USERS (Cajeros / Operarios BSale)
+# ============================================================
+
+def sync_users() -> dict:
+    """
+    Sincroniza usuarios desde BSale.
+
+    Trae TODOS los usuarios (activos e inactivos) porque documentos y
+    recepciones históricas los referencian por bsale_user_id.
+    Típicamente son pocos (~5-20), así que es una sola página.
+    """
+    log_id = db.sync_start("users")
+    stats = {"fetched": 0, "inserted": 0, "skipped": 0}
+
+    try:
+        items = paginate("/users.json")
+        stats["fetched"] = len(items)
+
+        rows = []
+        for item in items:
+            uid = _safe_int(item.get("id"))
+            if uid == 0:
+                db.log_quality_issue("users", None, "id", "INVALID_TYPE",
+                                     "User sin ID valido", str(item.get("id")))
+                stats["skipped"] += 1
+                continue
+
+            # office viene como objeto anidado con id como string
+            office_id = _safe_int((item.get("office") or {}).get("id")) or None
+
+            rows.append((
+                uid,
+                _clean_str(item.get("firstName")) or None,
+                _clean_str(item.get("lastName")) or None,
+                _clean_str(item.get("email")) or None,
+                office_id,
+                _bsale_state_active(item.get("state")),
+            ))
+
+        sql = """
+            INSERT INTO users (bsale_user_id, first_name, last_name, email,
+                               bsale_office_id, is_active, synced_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (bsale_user_id) DO UPDATE SET
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                email = EXCLUDED.email,
+                bsale_office_id = EXCLUDED.bsale_office_id,
+                is_active = EXCLUDED.is_active,
+                synced_at = NOW()
+        """
+        stats["inserted"] = db.execute_batch(sql, rows)
+        db.sync_finish(log_id, fetched=stats["fetched"], inserted=stats["inserted"],
+                        skipped=stats["skipped"])
+    except Exception as exc:
+        db.sync_finish(log_id, status="FAILED", error=str(exc),
+                        fetched=stats["fetched"])
+        raise
+
+    return stats
+
+
+# ============================================================
 # PRODUCT_TYPES (Categorias)
 # ============================================================
 
@@ -643,7 +706,12 @@ def sync_variant_costs() -> dict:
 # ============================================================
 
 def sync_stock_levels() -> dict:
-    """Sincroniza inventario de todas las sucursales."""
+    """Sincroniza inventario de todas las sucursales.
+
+    Fetch paralelo: 1 worker por sucursal. El RateLimiter global (bsale_client)
+    es thread-safe; los workers comparten el bucket de 9 RPS sin overflow.
+    Hoy serial: ~260s para 4 sucursales. Paralelo: ~80s.
+    """
     log_id = db.sync_start("stock_levels")
     stats = {"fetched": 0, "inserted": 0, "skipped": 0}
 
@@ -654,11 +722,24 @@ def sync_stock_levels() -> dict:
                 cur.execute("SELECT bsale_office_id FROM offices WHERE is_active = TRUE")
                 office_ids = [row[0] for row in cur.fetchall()]
 
+        # ── Fetch paralelo: 1 worker por sucursal ──
+        def _fetch_for_office(oid: int) -> tuple[int, list[dict]]:
+            items = paginate("/stocks.json", f"&officeid={oid}")
+            return oid, items
+
+        max_workers = min(len(office_ids), 4) or 1
+        per_office_items: dict[int, list[dict]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as exe:
+            futures = [exe.submit(_fetch_for_office, oid) for oid in office_ids]
+            for fut in concurrent.futures.as_completed(futures):
+                oid, items = fut.result()
+                logger.info("Stock office %d: %d registros", oid, len(items))
+                per_office_items[oid] = items
+
+        # Procesar en orden estable (por oid) para que el log no varíe entre corridas
         all_rows = []
         for oid in office_ids:
-            items = paginate("/stocks.json", f"&officeid={oid}")
-            logger.info("Stock office %d: %d registros", oid, len(items))
-
+            items = per_office_items.get(oid, [])
             for item in items:
                 sid = _safe_int(item.get("id"))
                 vid = _safe_int((item.get("variant") or {}).get("id"))

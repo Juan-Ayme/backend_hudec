@@ -6,6 +6,7 @@ Sincronizadores de entidades transaccionales (alto volumen).
 """
 
 import logging
+import threading
 import time
 import concurrent.futures
 from datetime import datetime, timezone
@@ -299,7 +300,13 @@ def _flush_documents(doc_rows: list[tuple], det_rows: list[tuple]):
 # ============================================================
 
 def sync_receptions() -> dict:
-    """Sincroniza recepciones de stock de todas las sucursales."""
+    """Sincroniza recepciones de stock de todas las sucursales.
+
+    Fetch + processing en paralelo por sucursal. Cada worker construye sus
+    rec_rows/det_rows locales y al final se hace UN solo batch insert global
+    (menos roundtrips DB que el flush por-sucursal del modelo anterior).
+    Hoy serial: ~400s para 4 sucursales. Paralelo: ~100s.
+    """
     log_id = db.sync_start("receptions")
     stats = {"fetched": 0, "inserted": 0, "skipped": 0, "details_inserted": 0}
 
@@ -310,34 +317,39 @@ def sync_receptions() -> dict:
                 cur.execute("SELECT bsale_office_id FROM offices WHERE is_active = TRUE")
                 office_ids = [row[0] for row in cur.fetchall()]
 
-        for oid in office_ids:
+        # Thread-safe locks para el log_quality_issue (un solo llamador a la vez
+        # para no congestionar el pool de DB durante los workers).
+        quality_lock = threading.Lock()
+
+        def _fetch_and_process(oid: int) -> tuple[int, list, list, dict]:
+            """Devuelve (oid, rec_rows, det_rows, local_stats)."""
+            local_stats = {"fetched": 0, "skipped": 0}
             items = paginate("/stocks/receptions.json",
                              f"&officeid={oid}&expand=%5Bdetails%2Cdocument%5D")
             logger.info("Recepciones office %d: %d registros", oid, len(items))
-            stats["fetched"] += len(items)
+            local_stats["fetched"] = len(items)
 
-            rec_rows = []
-            det_rows = []
+            rec_rows: list[tuple] = []
+            det_rows: list[tuple] = []
 
             for rec in items:
                 rec_id = _safe_int(rec.get("id"))
                 if rec_id == 0:
-                    stats["skipped"] += 1
+                    local_stats["skipped"] += 1
                     continue
 
-                # Fecha: prioridad documentDate > admissionDate (ambos pueden existir)
                 admission_unix = _safe_int(
                     rec.get("documentDate") or rec.get("admissionDate") or 0
                 )
                 admission_ts = _unix_to_ts(admission_unix)
                 if admission_ts is None:
-                    db.log_quality_issue("receptions", rec_id, "admissionDate",
-                                         "INVALID_TYPE", "Fecha invalida",
-                                         str(rec.get("admissionDate")))
-                    stats["skipped"] += 1
+                    with quality_lock:
+                        db.log_quality_issue("receptions", rec_id, "admissionDate",
+                                             "INVALID_TYPE", "Fecha invalida",
+                                             str(rec.get("admissionDate")))
+                    local_stats["skipped"] += 1
                     continue
 
-                # Detectar traslado
                 note = rec.get("note") or ""
                 is_dispatch = _safe_int(rec.get("internalDispatchId")) > 0
                 is_transfer = is_dispatch or "TRASLADO" in note.upper()
@@ -359,14 +371,11 @@ def sync_receptions() -> dict:
                     user_id,
                 ))
 
-                # Detalles — "Motor de Excavación"
-                # BSale limita detalles inline a 25 items. Si hay >= 25,
-                # SIEMPRE paginamos el endpoint de detalles para no perder items.
+                # Detalles — "Motor de Excavación" (idem versión serial)
                 details_container = rec.get("details") or {}
                 detail_items = details_container.get("items") or []
                 detail_count = _safe_int(details_container.get("count"))
 
-                # Trampa de los 25: si vinieron 25+ items, excavamos el endpoint real
                 needs_deep_fetch = (
                     len(detail_items) >= 25
                     or (detail_count > len(detail_items))
@@ -389,34 +398,49 @@ def sync_receptions() -> dict:
                         _safe_float(det.get("cost")),
                     ))
 
-            # Flush por sucursal
-            sql_rec = """
-                INSERT INTO receptions (bsale_reception_id, bsale_office_id,
-                                        admission_date, admission_date_raw,
-                                        document_ref, document_number, note,
-                                        is_internal_dispatch, is_transfer,
-                                        bsale_user_id, synced_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (bsale_reception_id) DO UPDATE SET
-                    note = EXCLUDED.note,
-                    is_transfer = EXCLUDED.is_transfer,
-                    synced_at = NOW()
-            """
-            db.execute_batch(sql_rec, rec_rows)
-            stats["inserted"] += len(rec_rows)
+            return oid, rec_rows, det_rows, local_stats
 
-            sql_det = """
-                INSERT INTO reception_details (bsale_reception_detail_id,
-                                               bsale_reception_id, bsale_variant_id,
-                                               quantity, cost, synced_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (bsale_reception_detail_id) DO UPDATE SET
-                    quantity = EXCLUDED.quantity,
-                    cost = EXCLUDED.cost,
-                    synced_at = NOW()
-            """
-            db.execute_batch(sql_det, det_rows)
-            stats["details_inserted"] += len(det_rows)
+        # ── Paralelo: 1 worker por sucursal ──
+        max_workers = min(len(office_ids), 4) or 1
+        all_rec_rows: list[tuple] = []
+        all_det_rows: list[tuple] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as exe:
+            futures = [exe.submit(_fetch_and_process, oid) for oid in office_ids]
+            for fut in concurrent.futures.as_completed(futures):
+                _oid, rec_rows, det_rows, local_stats = fut.result()
+                all_rec_rows.extend(rec_rows)
+                all_det_rows.extend(det_rows)
+                stats["fetched"] += local_stats["fetched"]
+                stats["skipped"] += local_stats["skipped"]
+
+        # ── Batch inserts globales (una sola roundtrip por tabla) ──
+        sql_rec = """
+            INSERT INTO receptions (bsale_reception_id, bsale_office_id,
+                                    admission_date, admission_date_raw,
+                                    document_ref, document_number, note,
+                                    is_internal_dispatch, is_transfer,
+                                    bsale_user_id, synced_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (bsale_reception_id) DO UPDATE SET
+                note = EXCLUDED.note,
+                is_transfer = EXCLUDED.is_transfer,
+                synced_at = NOW()
+        """
+        db.execute_batch(sql_rec, all_rec_rows)
+        stats["inserted"] = len(all_rec_rows)
+
+        sql_det = """
+            INSERT INTO reception_details (bsale_reception_detail_id,
+                                           bsale_reception_id, bsale_variant_id,
+                                           quantity, cost, synced_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (bsale_reception_detail_id) DO UPDATE SET
+                quantity = EXCLUDED.quantity,
+                cost = EXCLUDED.cost,
+                synced_at = NOW()
+        """
+        db.execute_batch(sql_det, all_det_rows)
+        stats["details_inserted"] = len(all_det_rows)
 
         logger.info("Recepciones: %d headers, %d detalles",
                      stats["inserted"], stats["details_inserted"])
@@ -432,7 +456,11 @@ def sync_receptions() -> dict:
 
 
 def sync_consumptions() -> dict:
-    """Sincroniza consumos de stock (mermas, uso interno) de todas las sucursales."""
+    """Sincroniza consumos de stock (mermas, uso interno) de todas las sucursales.
+
+    Fetch + processing paralelo por sucursal (mismo patrón que sync_receptions).
+    Hoy serial: ~93s. Paralelo: ~25s.
+    """
     log_id = db.sync_start("consumptions")
     stats = {"fetched": 0, "inserted": 0, "skipped": 0, "details_inserted": 0}
 
@@ -443,25 +471,26 @@ def sync_consumptions() -> dict:
                 cur.execute("SELECT bsale_office_id FROM offices WHERE is_active = TRUE")
                 office_ids = [row[0] for row in cur.fetchall()]
 
-        for oid in office_ids:
+        def _fetch_and_process(oid: int) -> tuple[int, list, list, dict]:
+            local_stats = {"fetched": 0, "skipped": 0}
             items = paginate("/stocks/consumptions.json",
                              f"&officeid={oid}&expand=%5Bdetails%5D")
             logger.info("Consumos office %d: %d registros", oid, len(items))
-            stats["fetched"] += len(items)
+            local_stats["fetched"] = len(items)
 
-            cons_rows = []
-            det_rows = []
+            cons_rows: list[tuple] = []
+            det_rows: list[tuple] = []
 
             for cons in items:
                 cons_id = _safe_int(cons.get("id"))
                 if cons_id == 0:
-                    stats["skipped"] += 1
+                    local_stats["skipped"] += 1
                     continue
 
                 consumption_unix = _safe_int(cons.get("consumptionDate") or 0)
                 consumption_ts = _unix_to_ts(consumption_unix)
                 if consumption_ts is None:
-                    stats["skipped"] += 1
+                    local_stats["skipped"] += 1
                     continue
 
                 note = cons.get("note") or ""
@@ -499,25 +528,40 @@ def sync_consumptions() -> dict:
                         _safe_float(det.get("quantity")),
                     ))
 
-            # Flush por sucursal
-            sql_cons = """
-                INSERT INTO consumptions (bsale_consumption_id, bsale_office_id,
-                                          consumption_date, note)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (bsale_consumption_id) DO UPDATE SET
-                    note = EXCLUDED.note
-            """
-            db.execute_batch(sql_cons, cons_rows)
-            stats["inserted"] += len(cons_rows)
+            return oid, cons_rows, det_rows, local_stats
 
-            sql_det = """
-                INSERT INTO consumption_details (id, bsale_consumption_id, bsale_variant_id, quantity)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    quantity = EXCLUDED.quantity
-            """
-            db.execute_batch(sql_det, det_rows)
-            stats["details_inserted"] += len(det_rows)
+        # ── Paralelo: 1 worker por sucursal ──
+        max_workers = min(len(office_ids), 4) or 1
+        all_cons_rows: list[tuple] = []
+        all_det_rows: list[tuple] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as exe:
+            futures = [exe.submit(_fetch_and_process, oid) for oid in office_ids]
+            for fut in concurrent.futures.as_completed(futures):
+                _oid, cons_rows, det_rows, local_stats = fut.result()
+                all_cons_rows.extend(cons_rows)
+                all_det_rows.extend(det_rows)
+                stats["fetched"] += local_stats["fetched"]
+                stats["skipped"] += local_stats["skipped"]
+
+        # ── Batch inserts globales ──
+        sql_cons = """
+            INSERT INTO consumptions (bsale_consumption_id, bsale_office_id,
+                                      consumption_date, note)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (bsale_consumption_id) DO UPDATE SET
+                note = EXCLUDED.note
+        """
+        db.execute_batch(sql_cons, all_cons_rows)
+        stats["inserted"] = len(all_cons_rows)
+
+        sql_det = """
+            INSERT INTO consumption_details (id, bsale_consumption_id, bsale_variant_id, quantity)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                quantity = EXCLUDED.quantity
+        """
+        db.execute_batch(sql_det, all_det_rows)
+        stats["details_inserted"] = len(all_det_rows)
 
         logger.info("Consumos: %d headers, %d detalles",
                      stats["inserted"], stats["details_inserted"])

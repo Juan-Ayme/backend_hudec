@@ -20,7 +20,7 @@ DB_URL = (
 async def main():
     engine = create_async_engine(DB_URL, echo=False)
     Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    sql = _load_sql("04")
+    sql = _load_sql("04b")
 
     async with Session() as s:
         await s.execute(text("SET LOCAL enable_nestloop = off"))

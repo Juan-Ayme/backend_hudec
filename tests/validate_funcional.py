@@ -77,7 +77,7 @@ async def main() -> int:
     print("=" * 70)
     baselines = {}
     async with Session() as s:
-        for mod in ("04", "04b", "05", "06", "07", "08"):
+        for mod in ("04b",):  # único módulo que sobrevivió al cleanup
             try:
                 params = _get_query_params()
                 total, dist, ms = await run_module(s, mod, params)
@@ -100,7 +100,7 @@ async def main() -> int:
     print("  actividad en la ventana y/o redistribuir clasificaciones.")
     print()
     async with Session() as s:
-        for mod in ("04", "07", "08"):
+        for mod in ("04b",):
             try:
                 params = _get_query_params()
                 params["ventana_main_dias"] = 60   # ★ override del default 90
@@ -128,8 +128,8 @@ async def main() -> int:
         try:
             params = _get_query_params()
             params["proy_mes_alta"] = 1   # ★ default 30
-            _, dist_low, _ = await run_module(s, "04", params)
-            _, dist_normal = baselines["04"]
+            _, dist_low, _ = await run_module(s, "04b", params)
+            _, dist_normal = baselines["04b"]
             alta_low = sum(v for k, v in dist_low.items() if "ALTA ROTACIÓN" in k)
             alta_normal = sum(v for k, v in dist_normal.items() if "ALTA ROTACIÓN" in k)
             cambio = alta_low > alta_normal
@@ -152,13 +152,13 @@ async def main() -> int:
         try:
             params = _get_query_params()
             params["warehouse_user_ids"] = [999999]  # ningún user real
-            total_x, _, _ = await run_module(s, "04", params)
-            total_normal, _ = baselines["04"]
-            print(f"  04: warehouse_users normal → {total_normal} filas")
-            print(f"      warehouse_users=[999999] → {total_x} filas")
+            total_x, _, _ = await run_module(s, "04b", params)
+            total_normal, _ = baselines["04b"]
+            print(f"  04b: warehouse_users normal → {total_normal} filas")
+            print(f"       warehouse_users=[999999] → {total_x} filas")
             # Aquí el cambio debe verse en los datos, no en la cantidad — verifiquemos
             # las fechas de última recepción.
-            sql = _load_sql("04")
+            sql = _load_sql("04b")
             r1 = (await s.execute(text(sql), _get_query_params())).mappings().all()
             params2 = _get_query_params(); params2["warehouse_user_ids"] = [999999]
             r2 = (await s.execute(text(sql), params2)).mappings().all()

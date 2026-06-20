@@ -118,7 +118,19 @@
         synced_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
     );
 
-    -- 11. Stock Levels
+    -- 11. Users (Cajeros / Operarios BSale)
+    CREATE TABLE users (
+        bsale_user_id INTEGER PRIMARY KEY,
+        first_name VARCHAR(200),
+        last_name VARCHAR(200),
+        email VARCHAR(300),
+        bsale_office_id INTEGER REFERENCES offices(bsale_office_id),
+        is_active BOOLEAN DEFAULT TRUE NOT NULL,
+        synced_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    );
+    CREATE INDEX idx_users_office ON users(bsale_office_id);
+
+    -- 12. Stock Levels
     CREATE TABLE stock_levels (
         bsale_stock_id INTEGER PRIMARY KEY,
         bsale_variant_id INTEGER NOT NULL,
@@ -132,7 +144,7 @@
     CREATE INDEX idx_stock_levels_variant ON stock_levels(bsale_variant_id);
     CREATE INDEX idx_stock_levels_office ON stock_levels(bsale_office_id);
 
-    -- 12. Stock History
+    -- 13. Stock History
     CREATE TABLE stock_history (
         id SERIAL PRIMARY KEY,
         snapshot_date DATE NOT NULL,
@@ -147,7 +159,7 @@
     CREATE INDEX idx_stock_history_date ON stock_history(snapshot_date);
     CREATE INDEX idx_stock_history_variant ON stock_history(bsale_variant_id);
 
-    -- 13. Document Types
+    -- 14. Document Types
     CREATE TABLE document_types (
         bsale_document_type_id INTEGER PRIMARY KEY,
         name VARCHAR(200) NOT NULL,
@@ -159,7 +171,7 @@
         synced_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
     );
 
-    -- 14. Documents
+    -- 15. Documents
     CREATE TABLE documents (
         bsale_document_id INTEGER PRIMARY KEY,
         bsale_document_type_id INTEGER NOT NULL REFERENCES document_types(bsale_document_type_id),
@@ -174,7 +186,7 @@
         exempt_amount NUMERIC(20,2) DEFAULT 0 NOT NULL,
         is_credit_note BOOLEAN DEFAULT FALSE NOT NULL,
         is_active BOOLEAN DEFAULT TRUE NOT NULL,
-        bsale_user_id INTEGER,
+        bsale_user_id INTEGER REFERENCES users(bsale_user_id),
         token VARCHAR(60),
         synced_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
     );
@@ -183,7 +195,7 @@
     CREATE INDEX idx_documents_emission ON documents(emission_date);
     CREATE INDEX idx_documents_credit ON documents(is_credit_note);
 
-    -- 15. Document Details
+    -- 16. Document Details
     CREATE TABLE document_details (
         bsale_detail_id INTEGER PRIMARY KEY,
         bsale_document_id INTEGER NOT NULL REFERENCES documents(bsale_document_id) ON DELETE CASCADE,
@@ -203,7 +215,7 @@
     CREATE INDEX idx_doc_details_document ON document_details(bsale_document_id);
     CREATE INDEX idx_doc_details_variant ON document_details(bsale_variant_id);
 
-    -- 16. Receptions
+    -- 17. Receptions
     CREATE TABLE receptions (
         bsale_reception_id INTEGER PRIMARY KEY,
         bsale_office_id INTEGER NOT NULL REFERENCES offices(bsale_office_id) ON DELETE CASCADE,
@@ -214,13 +226,13 @@
         note TEXT,
         is_internal_dispatch BOOLEAN DEFAULT FALSE NOT NULL,
         is_transfer BOOLEAN DEFAULT FALSE NOT NULL,
-        bsale_user_id INTEGER,
+        bsale_user_id INTEGER REFERENCES users(bsale_user_id),
         synced_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
     );
     CREATE INDEX idx_receptions_office ON receptions(bsale_office_id);
     CREATE INDEX idx_receptions_date ON receptions(admission_date);
 
-    -- 17. Reception Details
+    -- 18. Reception Details
     CREATE TABLE reception_details (
         bsale_reception_detail_id INTEGER PRIMARY KEY,
         bsale_reception_id INTEGER NOT NULL REFERENCES receptions(bsale_reception_id) ON DELETE CASCADE,
@@ -232,7 +244,7 @@
     CREATE INDEX idx_reception_details_reception ON reception_details(bsale_reception_id);
     CREATE INDEX idx_reception_details_variant ON reception_details(bsale_variant_id);
 
-    -- 18. Consumptions (consumos/mermas registrados en Bsale)
+    -- 19. Consumptions (consumos/mermas registrados en Bsale)
     CREATE TABLE consumptions (
         bsale_consumption_id INTEGER PRIMARY KEY,
         bsale_office_id INTEGER NOT NULL REFERENCES offices(bsale_office_id) ON DELETE CASCADE,
@@ -243,7 +255,7 @@
     CREATE INDEX idx_consumptions_date ON consumptions(consumption_date);
     CREATE INDEX idx_consumptions_office ON consumptions(bsale_office_id);
 
-    -- 19. Consumption Details
+    -- 20. Consumption Details
     CREATE TABLE consumption_details (
         id SERIAL PRIMARY KEY,
         bsale_consumption_id INTEGER NOT NULL REFERENCES consumptions(bsale_consumption_id) ON DELETE CASCADE,
@@ -254,7 +266,7 @@
     CREATE INDEX idx_consumption_details_cons ON consumption_details(bsale_consumption_id);
     CREATE INDEX idx_consumption_details_var ON consumption_details(bsale_variant_id);
 
-    -- 20. Data Quality Issues
+    -- 21. Data Quality Issues
     CREATE TABLE data_quality_issues (
         id SERIAL PRIMARY KEY,
         entity VARCHAR(80) NOT NULL,
@@ -267,7 +279,7 @@
     );
     CREATE INDEX idx_dqi_entity ON data_quality_issues(entity, created_at DESC);
 
-    -- 21. Sync Log
+    -- 22. Sync Log
     CREATE TABLE sync_log (
         id SERIAL PRIMARY KEY,
         entity VARCHAR(80) NOT NULL,
@@ -283,7 +295,7 @@
     );
     CREATE INDEX idx_sync_log_entity ON sync_log(entity, started_at DESC);
 
-    -- 22. Views
+    -- 23. Views
     CREATE VIEW v_product_types_full AS
     SELECT pt.bsale_product_type_id,
         pt.name AS product_type_name,

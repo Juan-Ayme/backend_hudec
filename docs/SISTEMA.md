@@ -85,18 +85,19 @@ El núcleo del sistema. Para cada SKU×sucursal calcula métricas (ventas 90d, s
 | `05` | Operativa + contexto lifetime (sell-through histórico, mejor mes, índice de contribución) |
 | `06` | Histórico (autopsia lifetime) |
 | `07` | Consolidado jerárquico DEPT→CAT→SUBCAT→SKU (ABC Pareto) |
-| `08` ★ | **Transferencias inter-sucursal** — pares (donante, receptor, SKU). Auto-generado desde 04b por `_beta/generar_08_transferencias.py` |
+| `08` ★ | **Transferencias inter-sucursal** — pares (donante, receptor, SKU). Auto-generado desde `_matriz_90d_base.sql` por `_beta/generar_08_transferencias.py` |
 
-`service.py` carga el SQL (cacheado), pasa parámetros desde `.env`, y aplica filtros post-query. **Las 04/04b/05 comparten la misma cascada de clasificación** (convergidas para evitar divergencias). El `08` reutiliza las CTEs base de 04b y agrega su propio SELECT para self-join entre sucursales.
+`service.py` carga el SQL (cacheado), pasa parámetros desde `.env`, y aplica filtros post-query. **Las 04/04b/05 son COMPUESTAS (2026-06-11):** comparten `_matriz_90d_base.sql` (todas las CTEs + cascada de clasificación, termina en la CTE `matriz`) y el archivo de cada módulo es solo su SELECT final (proyección de columnas; filtro de fantasmas en 04b/05; ventanas jerárquicas en S/ en 04b). Un fix de lógica se hace UNA vez en la base y aplica a las tres — ya no pueden divergir. Diferencias por módulo: el 04 NO filtra fantasmas (muestra el universo completo) y el 05 proyecta `xyz_legacy` (variante vieja de XYZ basada en `unds_post_recep`, preservada tal cual al unificar). El `08` reutiliza las CTEs de la base (hasta `cat_baseline`) y agrega su propio SELECT para self-join entre sucursales.
 
 ### 4.2 Métricas clave por SKU
 - **Velocidad lifetime (`proy_mes`)** = ventas del lote actual ÷ días efectivos del ciclo (NO lifetime calendario — no diluye con días sin stock).
 - **Velocidad reciente 30d (`proy_30d_reciente`)** = unds vendidas 30d ÷ días con stock en esos 30d.
 - **Cobertura (`dias_cobertura_reciente`)** ★ — usa la velocidad reciente (P17, 2026-06-06). Es lo que clasifica al SKU en la cascada. Fallback a vel lifetime si no hay datos recientes.
 - **% Rotación Stock**, **% Demanda vs Reposición**, **% Frecuencia**, **XYZ** (constante/variable/ráfaga), **Sell-through lifetime**.
+- **Días Exhibido** (2026-06-11) — días reales con stock>0 en tienda dentro del ciclo del lote (la misma cifra que alimenta la velocidad, sin el piso de 7d). Complementa "Llegó hace": un lote puede llevar 80d en tienda pero solo 28 exhibido (el resto agotado). Puede superar a "Llegó hace" si el ciclo arrancó en una recepción anterior a la última.
 - **Tendencia** = ventas últimos 45d vs 45d previos (📈 creciendo / 📉 decayendo / 💤 pausado / 💤 Agotado si stock=0). El "Agotado" es del P7 (2026-06-08): cuando stock=0, la fórmula mecánica decía "Decayendo" porque recent=0 — engañoso.
 
-### 4.3 Clasificaciones — las 33 cajas (post-rename 2026-06-06)
+### 4.3 Clasificaciones — las 36 cajas (+1 catch-all; recuento real 2026-06-12)
 
 Todas las cajas tienen formato **`EMOJI NOMBRE — VERBO ACCIÓN: descripción`**. Cuando el frontend muestra solo el chip, corta en el `:`.
 
@@ -109,17 +110,18 @@ Todas las cajas tienen formato **`EMOJI NOMBRE — VERBO ACCIÓN: descripción`*
 
 **Sección B · Stock=0 + vendió bien (5):**
 - 🔥 BESTSELLER ACTIVO — REPONER YA (antes: EXITOSO ACTIVO)
-- ⏸️ BESTSELLER EN PAUSA — EVALUAR (antes: EXITOSO PASADO)
+- ⏸️ BESTSELLER AGOTADO 1-2 MESES — REPONER (P21, antes: BESTSELLER EN PAUSA / EXITOSO PASADO)
 - 💎 OPORTUNIDAD PERDIDA — REPONER YA (antes: EXITOSO OLVIDADO)
 - 🐢 LENTO PERO CONSTANTE — REPONER POCO (antes: ROTACIÓN LENTA SANA)
 - 💤 DEMANDA EXTINTA — NO REPONER
 
-**Sección C · Stock=0 + vendió poco (7):**
+**Sección C · Stock=0 + vendió poco (8):**
 - 🚨 QUIEBRE DE BESTSELLER — COMPRAR YA
 - ✨ AGOTADO CON DEMANDA — REPONER (antes: AGOTADO POTENCIAL ACTIVO)
 - 📉 EX-BESTSELLER ENFRIADO — EVALUAR
 - 🌿 PRODUCTO EMERGENTE — VIGILAR
 - 🪦 PRODUCTO MUERTO — DESCATALOGAR
+- ❓ RECIBIDO Y NO VENDIDO (revisar mermas/transferencias)
 - 🪦 BAJO VOLUMEN AGOTADO — DESCATALOGAR
 - 👻 AGOTADO NO PRIORITARIO
 
@@ -127,7 +129,7 @@ Todas las cajas tienen formato **`EMOJI NOMBRE — VERBO ACCIÓN: descripción`*
 - 🔄 STOCK RECIÉN LLEGADO — ESPERAR
 - 💀 STOCK PARADO 90 DÍAS — LIQUIDAR (antes: MUERTO 90D)
 
-**Sección E · Stock>0 + con ventas (14):**
+**Sección E · Stock>0 + con ventas (16):**
 - 👀 STOCK BAJO QUIETO — VERIFICAR EN TIENDA (antes: ALERTA VISUAL)
 - 🔄 LOTE NUEVO VENDIENDO BIEN
 - 🆕 RECIÉN REABASTECIDO — ESPERAR 1 SEMANA
@@ -135,11 +137,12 @@ Todas las cajas tienen formato **`EMOJI NOMBRE — VERBO ACCIÓN: descripción`*
 - 💀 **LOTE FRENADO — LIQUIDAR, NO COMPRAR MÁS** (P15, antes SALDO QUEMADO)
 - 🔥📉 ROTACIÓN BAJANDO — REPONER MENOS
 - 🔥 ALTA ROTACIÓN — PRIORIDAD DE COMPRA
+- ⚡ **ROTACIÓN ACTIVA AL BORDE — REPONER YA** ★ (P23, 2026-06-12 — el lote actual llegó hace ≤30d + vol 10-29/mes + cobertura ≤15d = margen de reposición. Captura nuevos, relanzamientos y reposiciones que quedaron cortas; los veteranos con lote viejo y cob baja son recompra de rutina y quedan en MANTENER FLUJO)
 - 💫 ROTACIÓN ACTIVA — MANTENER FLUJO
 - 🟢 INVENTARIO SANO — RITMO NORMAL
 - 🧊📉 EXCESO + DEMANDA CAYENDO — PROMOCIONAR YA
 - 🧊 STOCK EXCESIVO — PROMOCIONAR
-- 🪦 **LENTO CRÓNICO — NO REPONER** ★ (P18, 2026-06-08 — SKUs con edad≥180d, vel lifetime <5/mes, lifetime <60 unds; caso GFQQ-240437 REL DE PARED)
+- 🪦 **LENTO CRÓNICO — NO REPONER** ★ (P18, 2026-06-08 — SKUs con edad≥180d, vel lifetime <5/mes, lifetime <60 unds; caso GFQQ-240437 REL DE PARED. P21: guard dsv≥8 — si vendió esta semana deciden las reglas de stock crítico)
 - ⚠️ POCO STOCK CON DEMANDA — REPONER
 - 📈 VENDIENDO MÁS QUE ANTES — VIGILAR (con guard `cob ≤45d` post-P16)
 - 🐢 BAJA ROTACIÓN — PEDIR MENOS
@@ -148,6 +151,8 @@ Todas las cajas tienen formato **`EMOJI NOMBRE — VERBO ACCIÓN: descripción`*
 - `Llegó hace (días)` — días desde la última recepción del lote actual.
 - `Sell-through Lote %` — % del lote actual ya vendido (`unds_lote_total / (unds_lote_total + stock) × 100`).
 - `Vida lote (días)` ★ (P19, 2026-06-08) — proyección total: `dias_desde_ultima_recep + dias_cobertura_reciente`. Muestra cuánto tardará el lote completo en agotarse. Útil para decidir tamaños de orden de compra (si >60d, considerar lotes más chicos).
+- `Stock Almacén` ★ (P22, 2026-06-11) — stock disponible en oficinas FUERA de las tiendas (Almacén Central). Si >0 y la tienda está baja, la acción es **TRASLADAR**, no comprar al proveedor. En el Excel se pinta azul cuando hay backup.
+- `Cobertura` — desde P22 muestra `dias_cobertura_reciente` (la MISMA que usa la cascada para clasificar) y stock=0 siempre dice 'Agotado'. Antes mostraba la lifetime y podía caer en banda distinta a la clasificación.
 - Útiles juntas: 87% sell-through con "llegó hace 300d" indica producto lento crónico, mientras 87% con "llegó hace 30d" indica bestseller rotando rápido. **78% del catálogo KAWII tiene Vida lote >90d** (modelo nicho — esperable, no anomalía).
 
 **Sección F · Catch-all (1):**
@@ -180,9 +185,9 @@ Departamentos de campaña (`SEASONAL_DEPARTMENTS=21,12` en `.env`: "Temporada y 
 
 ### Sección Análisis
 - **Dashboard** (`/`) — KPIs (ventas, ticket promedio, stock valorizado, productos), ventas por día, por departamento, por sucursal, top productos.
-- **Productos** (`/productos`), **Stock** (`/stock`), **Ventas** (`/ventas`, documentos).
-- **Ventas & Catálogo** (`/ventas-jerarquicas`) — maestro-detalle: árbol de ventas jerárquico (Depto→Cat→Subcat con % y montos) a la izquierda; al seleccionar un nivel, grid de productos clasificados a la derecha, con chips de comportamiento, búsqueda y export Excel. Unificó las antiguas "Ventas Jerárquicas" + "Catálogo".
-- **Matrices KAWII** (`/matrices`) — la tabla de clasificación con filtros, distribución, grupos de acción y transferencias.
+- **Productos** (`/productos`).
+
+> Las páginas históricas `/stock`, `/ventas`, `/ventas-jerarquicas` y `/matrices` se eliminaron en el cleanup en cascada: su funcionalidad la cubre con mejor diseño la pareja Dashboard + `/reportes/{tablero,diario}`. El endpoint `/stock/valuation` se movió a `/analytics/stock-valuation` para alimentar el DonutChart del Dashboard y el selector global de sucursal. La matriz de clasificación quedó reducida al único módulo `04b` (`/matrix/04b/{action-groups,excel}`), que es el que consumen los reportes vivos.
 
 ### Sección Reportes
 - **Reporte Diario** (`/reportes/diario`) — 3 secciones:

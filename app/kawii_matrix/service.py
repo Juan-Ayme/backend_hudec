@@ -20,21 +20,16 @@ from app.config import get_settings
 _SQL_DIR = Path(__file__).parent / "sql"
 
 MATRIX_MAP = {
-    "04":  "04_matriz_90d.sql",
     "04b": "04b_matriz_90d_jerarquico.sql",  # Matriz 90d + totales jerárquicos en S/
-    "05":  "05_matriz_operativa.sql",
-    "06":  "06_historico_productos.sql",
-    "07":  "07_informe_consolidado.sql",
-    "08":  "08_transferencias.sql",          # Sugerencias de transferencia inter-sucursal
 }
 
 # ★ Módulos COMPUESTOS: comparten las CTEs base + cascada de clasificación
 #   (_matriz_90d_base.sql, termina en la CTE `matriz`) y su archivo propio es
 #   solo el SELECT final (proyección de columnas + filtro fantasmas + ventanas
-#   jerárquicas). Así un fix de lógica se aplica UNA vez en la base y las tres
-#   matrices no pueden divergir.
+#   jerárquicas). 04b es el único superviviente tras la limpieza; cuando se
+#   sumen más módulos en el futuro, se vuelven a poner acá.
 _SHARED_BASE_FILE = "_matriz_90d_base.sql"
-_COMPOSED_MODULES = {"04", "04b", "05"}
+_COMPOSED_MODULES = {"04b"}
 
 
 @lru_cache(maxsize=8)
@@ -318,76 +313,6 @@ async def run_matrix(
     }
 
 
-async def get_distribution(
-    db: AsyncSession,
-    module_id: str,
-    *,
-    sucursal: str | None = None,
-) -> dict[str, Any]:
-    """
-    Devuelve la distribución de clasificaciones de un módulo.
-    Útil para dashboards: cuántos productos en cada categoría.
-    """
-    sql = _load_sql(module_id)
-    columns, rows = await _execute_query_to_dicts(db, sql)
-    settings = get_settings()
-
-    # Detectar columna de clasificación (varía por módulo)
-    label_col = None
-    for candidate in [
-        settings.CLASSIFICATION_LABEL,
-        "Prioridad / Recomendación",
-        "Diagnóstico Ciclo Vida",
-    ]:
-        if candidate in columns:
-            label_col = candidate
-            break
-    if not label_col:
-        raise RuntimeError(f"No se encontró columna de clasificación en módulo {module_id}")
-
-    if sucursal:
-        rows = [r for r in rows if r.get("Sucursal") and sucursal.casefold() in str(r["Sucursal"]).casefold()]
-
-    counts: dict[str, int] = {}
-    for r in rows:
-        label = str(r.get(label_col) or "(sin)")
-        counts[label] = counts.get(label, 0) + 1
-
-    items = [{"label": k, "count": v} for k, v in counts.items()]
-    items.sort(key=lambda x: -x["count"])
-    return {
-        "module": module_id,
-        "label_column": label_col,
-        "sucursal_filter": sucursal,
-        "total_skus": sum(c["count"] for c in items),
-        "categories": items,
-    }
-
-
-async def get_transfers(db: AsyncSession, module_id: str = "04") -> dict[str, Any]:
-    """
-    Devuelve solo los productos con sugerencia de transferencia inter-sucursal.
-    Solo aplica a módulos 04 y 05 que tienen esta columna.
-    """
-    if module_id not in ("04", "05"):
-        raise ValueError("Sugerencia Transferencia solo disponible en módulos 04 y 05")
-
-    sql = _load_sql(module_id)
-    columns, rows = await _execute_query_to_dicts(db, sql)
-    if "Sugerencia Transferencia" not in columns:
-        raise RuntimeError(f"Módulo {module_id} no tiene columna 'Sugerencia Transferencia'")
-
-    transfers = [
-        r for r in rows
-        if r.get("Sugerencia Transferencia") and "Transferir" in str(r["Sugerencia Transferencia"])
-    ]
-    return {
-        "module": module_id,
-        "total": len(transfers),
-        "transfers": transfers,
-    }
-
-
 ACTION_BUCKETS = (
     "urgente_comprar", "reponer", "saludable", "exceso",
     "liquidar", "descatalogar", "evaluar", "otro",
@@ -503,64 +428,4 @@ async def get_action_groups(db: AsyncSession, module_id: str = "04") -> dict[str
         "label_column": label_col,
         "summary": {k: len(v) for k, v in groups.items()},
         "groups": groups,
-    }
-
-
-async def get_summary(db: AsyncSession) -> dict[str, Any]:
-    """
-    Resumen ejecutivo combinando los 3 módulos operativos (04, 05, 07).
-    Útil para mostrar en una tarjeta del dashboard.
-    """
-    sql = _load_sql("04")
-    columns, rows = await _execute_query_to_dicts(db, sql)
-    settings = get_settings()
-
-    by_branch: dict[str, dict] = {}
-    transfers_count = 0
-    growing = 0
-    declining = 0
-
-    for r in rows:
-        suc = str(r.get("Sucursal") or "—")
-        if suc not in by_branch:
-            by_branch[suc] = {
-                "total_skus": 0,
-                "urgente": 0,
-                "reponer": 0,
-                "saludable": 0,
-                "descatalogar": 0,
-                "exceso": 0,
-            }
-        b = by_branch[suc]
-        b["total_skus"] += 1
-
-        # Reutilizamos classify_action para evitar drift entre dos
-        # implementaciones de la misma lógica de buckets.
-        action = classify_action(str(r.get(settings.CLASSIFICATION_LABEL) or ""))
-        if action == "urgente_comprar":
-            b["urgente"] += 1
-        elif action == "reponer":
-            b["reponer"] += 1
-        elif action == "saludable":
-            b["saludable"] += 1
-        elif action == "exceso":
-            b["exceso"] += 1
-        elif action == "descatalogar":
-            b["descatalogar"] += 1
-
-        # Transferencias y tendencia
-        if r.get("Sugerencia Transferencia") and "Transferir" in str(r["Sugerencia Transferencia"]):
-            transfers_count += 1
-        tend = str(r.get("Tendencia") or "")
-        if "Creciendo" in tend:
-            growing += 1
-        elif "Decayendo" in tend:
-            declining += 1
-
-    return {
-        "total_skus": len(rows),
-        "by_branch": by_branch,
-        "transfers_sugeridas": transfers_count,
-        "tendencia_creciendo": growing,
-        "tendencia_decayendo": declining,
     }
